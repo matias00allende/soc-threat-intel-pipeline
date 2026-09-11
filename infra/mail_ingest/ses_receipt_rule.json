@@ -1,0 +1,23 @@
+{
+  "Name": "guard-and-store-mailing-boletines",
+  "Enabled": true,
+  "TlsPolicy": "Optional",
+  "Recipients": [
+    "PLACEHOLDER_INGEST_EMAIL"
+  ],
+  "Actions": [
+    {
+      "LambdaAction": {
+        "FunctionArn": "PLACEHOLDER_MAIL_GUARD_LAMBDA_ARN",
+        "InvocationType": "RequestResponse"
+      }
+    },
+    {
+      "S3Action": {
+        "BucketName": "PLACEHOLDER_RAW_BUCKET_NAME",
+        "ObjectKeyPrefix": "raw/inbox/"
+      }
+    }
+  ],
+  "ScanEnabled": true
+}

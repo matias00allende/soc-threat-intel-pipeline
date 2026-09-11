@@ -1,0 +1,618 @@
+{
+  "name": "Boletines-CSOC",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "soc/boletines-csoc-ingest",
+        "authentication": "basicAuth",
+        "options": {}
+      },
+      "id": "e42708c1-16ba-44b7-9846-7e80352254e3",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        1808,
+        1392
+      ],
+      "webhookId": "soc-boletines-csoc-ingest",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "CONFIGURE_AFTER_IMPORT_WEBHOOK_CRED",
+          "name": "Unnamed credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const payload = $json.body ?? $json.payload ?? $json;\nconst data = typeof payload === 'string' ? JSON.parse(payload) : payload;\n\nif (!data || typeof data !== 'object') {\n  throw new Error('Webhook payload is empty or invalid');\n}\n\nif (!data.email) {\n  throw new Error('Webhook payload must include email');\n}\n\nconst normalizedKey = String(\n  data.normalized_key\n  || data.s3_key\n  || data.source_key\n  || data.key\n  || data.object_key\n  || ''\n).trim();\n\nif (!normalizedKey) {\n  throw new Error('Webhook payload must include normalized_key or equivalent source key');\n}\n\nreturn {\n  json: {\n    ...data,\n    normalized_key: normalizedKey\n  }\n};"
+      },
+      "id": "2698cd29-cdf0-4608-b569-cdd210fc563e",
+      "name": "Normalize Mail Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2064,
+        1392
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst raw = String(items[0]?.json?.text || '').trim()\n  .replace(/^```(?:json)?\\s*/i, '')\n  .replace(/\\s*```\\s*$/i, '');\nconst data = JSON.parse(raw);\n\nconst KNOWN_FAMILY_CORES = new Set(['0APT', '20230901POSIBLESII', '20230915', '7ZIP', 'A0BACKDOOR', 'ACTAJUDICIAL', 'AGENTTESLA', 'AGRICAL', 'AKGUM', 'ALERTA', 'ALFA', 'ALPHV', 'AMARANTHDRAGON', 'APT28', 'APT37', 'APTUAT9244', 'ARKANIXSTEALER', 'AUTOPASE', 'BADIIS', 'BANCODECHILE', 'BANCOESTADO', 'BLACKBASTA', 'BLACKCAT', 'BLACKMATHER', 'BLANCO', 'BORYPTGRAB', 'BOTNETDENETDRAGON', 'BOTNETSYSTEMBC', 'CACTUS', 'CFDIMANAGEREMISION', 'CGE', 'CHARLIEKIRKGRABBER', 'CHECKEREXE', 'CITACIONJUDICIAL', 'CLARO', 'CLIPXDAEMON', 'COMPANIA', 'COMUNICADOCAI', 'CONASET', 'CRESCENTHARVEST', 'DESCKVBRAT', 'DEVMAN', 'DHL', 'DHLSUPLANTACION', 'DLLLOADER324151', 'DRAGONFORCE', 'DRIVERAUDIOLNK', 'ECLIPSERANSOMWARE', 'EGREGOR', 'EMAIL', 'EXTRAL', 'FACTURADEUDA423534A3X', 'FALSAALERTADEDEMANDA', 'FALSAAUDIENCIAJUDICIAL', 'FALSADEMANDA', 'FALSAFACTURA', 'FALSAFACTURAADJUNTA', 'FALSAFACTURAPORVENCER', 'FALSANOTIFICACIONDEDEUDA', 'FALSANOTIFICACIONJUDICIAL', 'FALSANOTIFICACIOUDICIAL', 'FALSOAVISODEPAGO', 'FALSOPAGOOC', 'FISCALIA', 'FOXVEIL', 'FVNCBOT', 'GDSHORTCUT', 'GOLDEYEUUIO', 'GRANDOEIRO', 'GRANDOREIRO', 'GRANDOREIROCOMUNICADOFALSO', 'GRUPOAPT28', 'HATARTAM', 'HORABOT', 'IRAN', 'KEENADU', 'KNIGHTYREMCOS', 'LAZARUS', 'LIMPOPOX32CL', 'LIMPOPOX32MX', 'LIMPOPOX32PE', 'LOCKBIT30RANSOMWARE', 'LTXSTEALER', 'LUMMASTEALER', 'MAQVIRIFX', 'MASSIV', 'MEDUSARANSOMWARE', 'MEKOTIO', 'MIMICRAT', 'MINTRA', 'MTT', 'MUFF', 'NOTEPAD', 'OCRFIX', 'ODYSSEYSTEALER', 'PDI', 'PHANTOMVAI', 'PODERJUDICIAL', 'POSTULACIONLABORAL', 'PROMPTSPY', 'PULSARRAT', 'QILIN', 'RANJUDICIAL', 'RANSERNAC', 'RANSOMWARE', 'RANSOMWARE8BASE', 'RANSOMWAREBLACK', 'RANSOMWAREMARIOLOCKER', 'RANSOMWAREMEDUSALOCKER', 'RAT', 'RENENGINE', 'RHYSIDA', 'RORSCHACH', 'RYUK', 'SERVICIO', 'SERVIPAG', 'SHA256GRANDOEIRO', 'SHA265SHADOWCAMPAIGNS', 'SHABLACKBASTA', 'SHADOWHS', 'SHAQAKBOT', 'SHATGR', 'SII', 'SIILINKPDF', 'SILVER', 'SILVERFOX', 'SLOPPYLEMMING', 'SNAPPYCLIENT', 'SOCELARS', 'SODINOKIBI', 'SOLICITUDDATOSBANCARIOS', 'SSHSTALKER', 'STEAELITERAT', 'SUPERPENSIONES', 'SUPLANTACIONCGE', 'SUPLANTACIONCOASET', 'SUPLANTACIONCONASET', 'SUPLANTACIONSIIYTGR', 'SURXRAT', 'TAXISPY', 'TRIBE', 'TROJANRANSOMWANNACRYPTORA', 'TROJANRANSOMWANNACRYPTORH', 'TS', 'UDECHILE', 'UNC2814', 'VALLEYRAT', 'VIDARSTEALER', 'VOID', 'VORTEXWEREWOLF', 'XWORM', 'ZEROBOT', 'ZERODAYENDELL']);\n\nconst stripAccents = (value) => String(value || '')\n  .normalize('NFD')\n  .replace(/[\\u0300-\\u036f]/g, '');\n\nconst normalizeKnownCandidate = (value) => stripAccents(value)\n  .replace(/^SHA256_/i, '')\n  .toUpperCase()\n  .replace(/[^A-Z0-9_]+/g, ' ')\n  .trim();\n\nconst matchKnownFamily = (value) => {\n  const normalized = normalizeKnownCandidate(value);\n  if (!normalized) {\n    return '';\n  }\n\n  const compact = normalized.replace(/[\\s_]+/g, '');\n  if (KNOWN_FAMILY_CORES.has(compact)) {\n    return compact;\n  }\n\n  const tokens = normalized.split(/\\s+/).filter(Boolean);\n  for (const token of tokens) {\n    const direct = token.replace(/[^A-Z0-9]+/g, '');\n    if (KNOWN_FAMILY_CORES.has(direct)) {\n      return direct;\n    }\n  }\n\n  for (const family of KNOWN_FAMILY_CORES) {\n    if (compact.includes(String(family).replace(/_/g, ''))) {\n      return family;\n    }\n  }\n\n  return '';\n};\n\nconst normalizeThreatCore = (value) => {\n  let text = stripAccents(value)\n    .replace(/^SHA256_/i, '')\n    .toLowerCase()\n    .replace(/[^a-z0-9\\s_-]+/g, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n\n  text = text\n    .replace(/^(nueva|nuevo|nuevas|nuevos)\\s+actividad(?:es)?\\s+del\\s+malware\\s+/i, '')\n    .replace(/^actualizacion\\s+del\\s+troyano\\s+bancario\\s+/i, '')\n    .replace(/^actualizacion\\s+de\\s+/i, '')\n    .replace(/^actividad(?:es)?\\s+del\\s+malware\\s+/i, '')\n    .replace(/^actividad(?:es)?\\s+de\\s+/i, '')\n    .replace(/^troyano\\s+bancario\\s+/i, '')\n    .replace(/^malware\\s+/i, '')\n    .replace(/^amenaza\\s+/i, '')\n    .trim();\n\n  if (/\\bvidar\\b/.test(text) && /\\bstealer\\b/.test(text)) {\n    return 'VIDARSTEALER';\n  }\n\n  if (/\\bhorabot\\b/.test(text)) {\n    return 'HORABOT';\n  }\n\n  const knownFamily = matchKnownFamily(text);\n  if (knownFamily) {\n    return knownFamily;\n  }\n\n  const stopwords = new Set(['de', 'del', 'la', 'el', 'los', 'las', 'y', 'the', 'campaign', 'campana', 'campaigns']);\n  const tokens = text\n    .split(/\\s+/)\n    .map(token => token.trim())\n    .filter(token => token && !stopwords.has(token));\n\n  const compact = tokens.join('').replace(/[^a-z0-9]+/g, '');\n  return compact ? compact.toUpperCase() : 'UNKNOWN';\n};\n\nconst formatThreatTag = (value) => {\n  const core = normalizeThreatCore(value);\n  return core && core !== 'UNKNOWN' ? `SHA256_${core}` : '';\n};\n\nconst sha256Regex = /^[a-f0-9]{64}$/i;\nconst uniq = arr => [...new Set((Array.isArray(arr) ? arr : []).map(x => String(x).trim()).filter(Boolean))];\n\nconst ips = uniq(data.ips);\nconst domains = uniq(data.domains).map(x => x.toLowerCase());\nconst urls = uniq(data.urls);\n\nconst contextThreat = formatThreatTag(items[0]?.json?.context_threat_name || '');\nconst defaultThreat = formatThreatTag(data.default_threat_name || '') || contextThreat;\nconst unresolvedHashes = [];\n\nconst sha_lines = uniq((Array.isArray(data.sha256) ? data.sha256 : [])\n  .map(x => {\n    const hash = String(x?.value || '').trim().toLowerCase();\n    const threat = formatThreatTag(x?.threat_name || '') || defaultThreat;\n\n    if (!sha256Regex.test(hash)) {\n      return null;\n    }\n\n    if (!threat) {\n      unresolvedHashes.push(hash);\n      return null;\n    }\n\n    return `${hash} ${threat}`;\n  })\n  .filter(Boolean));\n\nif (unresolvedHashes.length > 0) {\n  throw new Error(`Unable to resolve canonical threat name for ${unresolvedHashes.length} SHA256 indicator(s): ${unresolvedHashes.join(', ')}`);\n}\n\nreturn [{\n  json: {\n    ips,\n    domains,\n    urls,\n    default_threat_name: defaultThreat || null,\n    sha_lines\n  }\n}];"
+      },
+      "id": "5ff00ed5-c476-40ab-ae99-ad04f77ae38d",
+      "name": "Parse IoC",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3040,
+        1376
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const actionShaLines = Array.isArray($json.action_sha_lines)\n  ? $json.action_sha_lines.map(x => String(x).trim()).filter(Boolean)\n  : [];\n\nconst newShaCount = Number($json.new_sha_count || 0);\nconst correctedShaCount = Number($json.corrected_sha_count || 0);\nconst totalActionCount = actionShaLines.length;\nconst introLine = 'Se procesó una actualización de IoC SHA256 para las listas integradas.';\n\nconst extractEmailAddress = (value) => {\n  const raw = String(value || '').trim();\n  if (!raw) {\n    return '';\n  }\n\n  const angleMatch = raw.match(/<([^<>\\s@]+@[^<>\\s@]+)>/);\n  if (angleMatch?.[1]) {\n    return angleMatch[1].toLowerCase();\n  }\n\n  const directMatch = raw.match(/([A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,})/i);\n  return directMatch?.[1]?.toLowerCase() || '';\n};\n\nconst originalFrom = $node['Normalize Mail Payload']?.json?.email?.from\n  || $node['Normalize Mail Payload']?.json?.email?.headers?.from\n  || '';\nconst originalFromEmail = extractEmailAddress(originalFrom);\nconst originalSubject = String($node['Normalize Mail Payload']?.json?.email?.subject || '').trim();\n\nconst cc = ['PLACEHOLDER_SOC_EMAIL_CC'];\nif (originalFromEmail && !cc.includes(originalFromEmail)) {\n  cc.push(originalFromEmail);\n}\n\nconst boletinMatch = originalSubject.match(/\\bbolet[ií]n\\b[^0-9]{0,25}([0-9]{4}-[0-9]+)/i);\nconst sourceLabel = boletinMatch?.[1] ? 'Fuente del reporte' : 'Reportado por';\nconst sourceValue = boletinMatch?.[1]\n  ? 'Boletín N° ' + boletinMatch[1]\n  : (originalFromEmail || originalFrom || 'Remitente no identificado');\n\nconst previewLines = actionShaLines.slice(0, 50);\nconst remainingCount = Math.max(0, totalActionCount - previewLines.length);\nconst generatedAt = new Date().toISOString();\nconst subject = 'Se han registrado nuevos IoC';\nconst title = 'Se ha recibido una actualización IoC';\nconst footerText = 'PLACEHOLDER_INSTITUTION_NAME.';\nconst statusLine = totalActionCount > 0\n  ? 'Los siguientes IoC SHA256 fueron agregados a la lista integrada con Firewall y enviados al proceso de sincronización con Bitdefender.'\n  : 'No se detectaron cambios en los IoC SHA256 para esta actualización.';\n\nlet preheader = 'Se procesó una actualización de IoC SHA256.';\nif (totalActionCount === 1) {\n  preheader = 'Se procesó 1 IoC en la actualización más reciente.';\n} else if (totalActionCount > 1) {\n  preheader = 'Se procesaron ' + totalActionCount + ' IoC en la actualización más reciente.';\n}\n\nconst textBody = [\n  introLine,\n  '',\n  statusLine,\n  '',\n  sourceLabel + ': ' + sourceValue,\n  '',\n  ...actionShaLines,\n  '',\n  'Total procesados: ' + totalActionCount,\n  'Nuevos: ' + newShaCount,\n  'Corregidos: ' + correctedShaCount,\n  '',\n  footerText\n].join('\\n');\n\nreturn {\n  json: {\n    from: 'PLACEHOLDER_SOC_EMAIL_FROM',\n    to: ['PLACEHOLDER_SOC_EMAIL_TO'],\n    cc,\n    subject,\n    text: textBody,\n    template_id: 'soc_ioc_notification_v1',\n    template_version: '1.0.0',\n    template_data: {\n      preheader,\n      title,\n      intro_line: introLine,\n      status_line: statusLine,\n      total_action_count: totalActionCount,\n      new_count: newShaCount,\n      corrected_count: correctedShaCount,\n      ioc_lines: actionShaLines,\n      preview_lines: previewLines,\n      remaining_count: remainingCount,\n      generated_at: generatedAt,\n      source_label: sourceLabel,\n      source_value: sourceValue,\n      original_from: originalFrom,\n      original_from_email: originalFromEmail,\n      original_subject: originalSubject,\n      municipality_name: 'PLACEHOLDER_INSTITUTION_NAME',\n      system_name: 'SOC Bot',\n      queue_purpose: 'soc-ioc-alert'\n    },\n    tags: {\n      system: 'n8n',\n      workflow: 'Boletines-CSOC',\n      purpose: 'soc-ioc-alert'\n    }\n  }\n};"
+      },
+      "id": "43e9a110-a216-42d2-9a24-9abfa5c0bc2d",
+      "name": "Build Corporate Mail Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4608,
+        1120
+      ]
+    },
+    {
+      "parameters": {
+        "queue": "PLACEHOLDER_SQS_SEND_QUEUE_URL",
+        "options": {}
+      },
+      "id": "d0ea7233-9cfc-4da3-8426-33cce8c5f61b",
+      "name": "Corporate Mail Queue",
+      "type": "n8n-nodes-base.awsSqs",
+      "typeVersion": 1,
+      "position": [
+        4880,
+        1120
+      ],
+      "credentials": {
+        "aws": {
+          "id": "CONFIGURE_AFTER_IMPORT_AWS_CRED",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "bucketName": "PLACEHOLDER_IOC_BUCKET_NAME",
+        "fileKey": "hash_sha256.txt"
+      },
+      "id": "aa2c37ea-2618-4c9a-8757-bf3ce6adfbba",
+      "name": "Get Blocklist",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 1,
+      "position": [
+        3248,
+        1264
+      ],
+      "credentials": {
+        "aws": {
+          "id": "CONFIGURE_AFTER_IMPORT_AWS_CRED",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nlet incoming = [];\nconst MIN_EXPECTED_EXISTING_SHA_COUNT = 1000;\nconst BLOCKLIST_URL = 'PLACEHOLDER_BLOCKLIST_URL';\nconst KNOWN_FAMILY_CORES = new Set(['0APT', '20230901POSIBLESII', '20230915', '7ZIP', 'A0BACKDOOR', 'ACTAJUDICIAL', 'AGENTTESLA', 'AGRICAL', 'AKGUM', 'ALERTA', 'ALFA', 'ALPHV', 'AMARANTHDRAGON', 'APT28', 'APT37', 'APTUAT9244', 'ARKANIXSTEALER', 'AUTOPASE', 'BADIIS', 'BANCODECHILE', 'BANCOESTADO', 'BLACKBASTA', 'BLACKCAT', 'BLACKMATHER', 'BLANCO', 'BORYPTGRAB', 'BOTNETDENETDRAGON', 'BOTNETSYSTEMBC', 'CACTUS', 'CFDIMANAGEREMISION', 'CGE', 'CHARLIEKIRKGRABBER', 'CHECKEREXE', 'CITACIONJUDICIAL', 'CLARO', 'CLIPXDAEMON', 'COMPANIA', 'COMUNICADOCAI', 'CONASET', 'CRESCENTHARVEST', 'DESCKVBRAT', 'DEVMAN', 'DHL', 'DHLSUPLANTACION', 'DLLLOADER324151', 'DRAGONFORCE', 'DRIVERAUDIOLNK', 'ECLIPSERANSOMWARE', 'EGREGOR', 'EMAIL', 'EXTRAL', 'FACTURADEUDA423534A3X', 'FALSAALERTADEDEMANDA', 'FALSAAUDIENCIAJUDICIAL', 'FALSADEMANDA', 'FALSAFACTURA', 'FALSAFACTURAADJUNTA', 'FALSAFACTURAPORVENCER', 'FALSANOTIFICACIONDEDEUDA', 'FALSANOTIFICACIONJUDICIAL', 'FALSANOTIFICACIOUDICIAL', 'FALSOAVISODEPAGO', 'FALSOPAGOOC', 'FISCALIA', 'FOXVEIL', 'FVNCBOT', 'GDSHORTCUT', 'GOLDEYEUUIO', 'GRANDOEIRO', 'GRANDOREIRO', 'GRANDOREIROCOMUNICADOFALSO', 'GRUPOAPT28', 'HATARTAM', 'HORABOT', 'IRAN', 'KEENADU', 'KNIGHTYREMCOS', 'LAZARUS', 'LIMPOPOX32CL', 'LIMPOPOX32MX', 'LIMPOPOX32PE', 'LOCKBIT30RANSOMWARE', 'LTXSTEALER', 'LUMMASTEALER', 'MAQVIRIFX', 'MASSIV', 'MEDUSARANSOMWARE', 'MEKOTIO', 'MIMICRAT', 'MINTRA', 'MTT', 'MUFF', 'NOTEPAD', 'OCRFIX', 'ODYSSEYSTEALER', 'PDI', 'PHANTOMVAI', 'PODERJUDICIAL', 'POSTULACIONLABORAL', 'PROMPTSPY', 'PULSARRAT', 'QILIN', 'RANJUDICIAL', 'RANSERNAC', 'RANSOMWARE', 'RANSOMWARE8BASE', 'RANSOMWAREBLACK', 'RANSOMWAREMARIOLOCKER', 'RANSOMWAREMEDUSALOCKER', 'RAT', 'RENENGINE', 'RHYSIDA', 'RORSCHACH', 'RYUK', 'SERVICIO', 'SERVIPAG', 'SHA256GRANDOEIRO', 'SHA265SHADOWCAMPAIGNS', 'SHABLACKBASTA', 'SHADOWHS', 'SHAQAKBOT', 'SHATGR', 'SII', 'SIILINKPDF', 'SILVER', 'SILVERFOX', 'SLOPPYLEMMING', 'SNAPPYCLIENT', 'SOCELARS', 'SODINOKIBI', 'SOLICITUDDATOSBANCARIOS', 'SSHSTALKER', 'STEAELITERAT', 'SUPERPENSIONES', 'SUPLANTACIONCGE', 'SUPLANTACIONCOASET', 'SUPLANTACIONCONASET', 'SUPLANTACIONSIIYTGR', 'SURXRAT', 'TAXISPY', 'TRIBE', 'TROJANRANSOMWANNACRYPTORA', 'TROJANRANSOMWANNACRYPTORH', 'TS', 'UDECHILE', 'UNC2814', 'VALLEYRAT', 'VIDARSTEALER', 'VOID', 'VORTEXWEREWOLF', 'XWORM', 'ZEROBOT', 'ZERODAYENDELL']);\n\nconst normalizeKnownCandidate = (value) => String(value || '')\n  .normalize('NFD')\n  .replace(/[\\u0300-\\u036f]/g, '')\n  .replace(/^SHA256_/i, '')\n  .toUpperCase()\n  .replace(/[^A-Z0-9_]+/g, ' ')\n  .trim();\n\nconst matchKnownFamily = (value) => {\n  const normalized = normalizeKnownCandidate(value);\n  if (!normalized) {\n    return '';\n  }\n\n  const compact = normalized.replace(/[\\s_]+/g, '');\n  if (KNOWN_FAMILY_CORES.has(compact)) {\n    return compact;\n  }\n\n  const tokens = normalized.split(/\\s+/).filter(Boolean);\n  for (const token of tokens) {\n    const direct = token.replace(/[^A-Z0-9]+/g, '');\n    if (KNOWN_FAMILY_CORES.has(direct)) {\n      return direct;\n    }\n  }\n\n  for (const family of KNOWN_FAMILY_CORES) {\n    if (compact.includes(String(family).replace(/_/g, ''))) {\n      return family;\n    }\n  }\n\n  return '';\n};\n\nconst normalizeThreatCore = (value) => {\n  const rawTag = String(value || '').trim();\n  if (!rawTag) {\n    return 'UNKNOWN';\n  }\n\n  const normalized = rawTag\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/^SHA256_/i, '')\n    .toLowerCase()\n    .replace(/[^a-z0-9]+/g, ' ')\n    .trim();\n\n  if (!normalized || normalized === 'unknown') {\n    return 'UNKNOWN';\n  }\n\n  if (/\\bvidar\\b/.test(normalized) && /\\bstealer\\b/.test(normalized)) {\n    return 'VIDARSTEALER';\n  }\n\n  if (/\\bhorabot\\b/.test(normalized)) {\n    return 'HORABOT';\n  }\n\n  const knownFamily = matchKnownFamily(normalized);\n  if (knownFamily) {\n    return knownFamily;\n  }\n\n  const compact = normalized.replace(/\\s+/g, '');\n  return compact ? compact.toUpperCase() : 'UNKNOWN';\n};\n\nconst canonicalTag = (value) => {\n  const core = normalizeThreatCore(value);\n  return core && core !== 'UNKNOWN' ? `SHA256_${core}` : '';\n};\n\nconst parseBlocklist = (inputRaw) => {\n  const byHash = new Map();\n  const order = [];\n  const rawHashes = new Set((String(inputRaw || '').match(/[a-f0-9]{64}/gi) || []).map(x => x.toLowerCase()));\n\n  for (const line of String(inputRaw || '').split(/\\r?\\n/)) {\n    const trimmed = String(line || '').trim();\n    const match = trimmed.match(/^([a-f0-9]{64})\\s+(.+)$/i);\n\n    if (!match) {\n      continue;\n    }\n\n    const hash = match[1].toLowerCase();\n    const tag = canonicalTag(match[2]) || 'SHA256_UNKNOWN';\n\n    if (!byHash.has(hash)) {\n      order.push(hash);\n    }\n\n    byHash.set(hash, tag);\n  }\n\n  return { byHash, order, rawHashes };\n};\n\nfor (const item of items) {\n  if (Array.isArray(item.json.sha_lines)) {\n    incoming = item.json.sha_lines\n      .map(x => String(x).trim())\n      .filter(Boolean);\n  }\n}\n\nconst fetched = await this.helpers.httpRequest({\n  method: 'GET',\n  url: BLOCKLIST_URL,\n  headers: { Accept: 'text/plain' },\n});\n\nconst raw = typeof fetched === 'string'\n  ? fetched\n  : typeof fetched?.body === 'string'\n    ? fetched.body\n    : JSON.stringify(fetched);\n\nconst parsed = parseBlocklist(raw);\nconst byHash = parsed.byHash;\nconst order = parsed.order;\nconst rawHashes = parsed.rawHashes;\nconst existingCount = byHash.size;\n\nif (existingCount < MIN_EXPECTED_EXISTING_SHA_COUNT) {\n  throw new Error(`Current blocklist appears unexpectedly small (${existingCount} hashes), abort write`);\n}\n\nif (rawHashes.size > 0 && existingCount < rawHashes.size) {\n  throw new Error(`Unable to safely parse existing blocklist (${existingCount}/${rawHashes.size} hashes), abort write`);\n}\n\nlet correctedCount = 0;\nlet addedCount = 0;\n\nfor (const line of incoming) {\n  const match = String(line).trim().match(/^([a-f0-9]{64})\\s+(.+)$/i);\n\n  if (!match) {\n    continue;\n  }\n\n  const hash = match[1].toLowerCase();\n  const incomingTag = canonicalTag(match[2]);\n\n  if (!incomingTag) {\n    throw new Error(`Incoming SHA256 indicator without canonical threat tag: ${hash}`);\n  }\n\n  const existingTag = byHash.get(hash);\n\n  if (!existingTag) {\n    byHash.set(hash, incomingTag);\n    order.push(hash);\n    addedCount++;\n    continue;\n  }\n\n  if (existingTag !== incomingTag) {\n    byHash.set(hash, incomingTag);\n    correctedCount++;\n  }\n}\n\nconst lines = order.map(hash => `${hash} ${byHash.get(hash)}`);\n\nif (lines.length < existingCount) {\n  throw new Error(`Blocklist shrank unexpectedly from ${existingCount} to ${lines.length}, abort write`);\n}\n\nreturn [{\n  json: {\n    blocklist: lines.join('\\n') + '\\n',\n    total_sha_count: lines.length,\n    existing_sha_count: existingCount,\n    incoming_sha_count: incoming.length,\n    corrected_sha_count: correctedCount,\n    added_sha_count: addedCount\n  }\n}];"
+      },
+      "id": "a61cbf8d-3da3-468f-ac6c-5411be3e3119",
+      "name": "Merge Blocklist",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3824,
+        1264
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "PLACEHOLDER_IOC_BUCKET_NAME",
+        "fileName": "hash_sha256.txt",
+        "binaryData": false,
+        "fileContent": "={{$json.blocklist}}",
+        "additionalFields": {}
+      },
+      "id": "25c694e7-ba0e-4868-a4cc-9573a9496ca0",
+      "name": "Write Blocklist",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        4608,
+        1312
+      ],
+      "credentials": {
+        "aws": {
+          "id": "CONFIGURE_AFTER_IMPORT_AWS_CRED",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{$json.llm_text}}",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "=Extrae indicadores de compromiso (IoC) del siguiente boletín.\n\nDevuelve SOLO JSON válido con esta estructura exacta:\n\n{\n  \"ips\": [],\n  \"domains\": [],\n  \"urls\": [],\n  \"default_threat_name\": \"\",\n  \"sha256\": [\n    {\n      \"value\": \"\",\n      \"threat_name\": \"\"\n    }\n  ]\n}\n\nReglas:\n- No inventes datos.\n- Extrae solo valores realmente presentes.\n- Los hash deben ir en minúsculas.\n- threat_name y default_threat_name deben representar solo la familia o nombre corto de la amenaza.\n- threat_name y default_threat_name deben ir en una sola palabra, en minúsculas y usando guion bajo solo si es estrictamente necesario.\n- NO devuelvas frases narrativas o descriptivas largas.\n- NO incluyas prefijos como sha256_.\n- Si el boletín trae una amenaza general en el campo Amenaza, asunto o contexto, úsala como default_threat_name.\n- Si un SHA256 no tiene threat_name específico, usa default_threat_name.\n- Usa \"unknown\" solo si de verdad no hay contexto suficiente.\n- Respeta el valor de Derived-Threat-Context cuando sea útil y consistente con el boletín.\n\nEjemplos esperados de family name:\n- horabot\n- vidarstealer\n- taxispy\n- snappyclient\n- surxrat\n- a0backdoor\n\nEjemplo:\nSi el texto dice \"ACTUALIZACION TROYANO BANCARIO HORABOT\", el valor correcto es \"horabot\".\nSi el texto dice \"NUEVA ACTIVIDAD DEL MALWARE VIDAR STEALER\", el valor correcto es \"vidarstealer\".\n\nTexto:\n{{$json.llm_text}}"
+            }
+          ]
+        },
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        2720,
+        1376
+      ],
+      "id": "3b020302-49c6-4158-8f96-8653a1f82454",
+      "name": "Basic LLM Chain"
+    },
+    {
+      "parameters": {
+        "modelSource": "inferenceProfile",
+        "model": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAwsBedrock",
+      "typeVersion": 1.1,
+      "position": [
+        2736,
+        1552
+      ],
+      "id": "19754953-d409-444c-a3c1-04b02beab8d3",
+      "name": "AWS Bedrock Chat Model",
+      "credentials": {
+        "aws": {
+          "id": "CONFIGURE_AFTER_IMPORT_AWS_CRED",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const email = $json.email;\n\nconst KNOWN_FAMILY_CORES = new Set(['0APT', '20230901POSIBLESII', '20230915', '7ZIP', 'A0BACKDOOR', 'ACTAJUDICIAL', 'AGENTTESLA', 'AGRICAL', 'AKGUM', 'ALERTA', 'ALFA', 'ALPHV', 'AMARANTHDRAGON', 'APT28', 'APT37', 'APTUAT9244', 'ARKANIXSTEALER', 'AUTOPASE', 'BADIIS', 'BANCODECHILE', 'BANCOESTADO', 'BLACKBASTA', 'BLACKCAT', 'BLACKMATHER', 'BLANCO', 'BORYPTGRAB', 'BOTNETDENETDRAGON', 'BOTNETSYSTEMBC', 'CACTUS', 'CFDIMANAGEREMISION', 'CGE', 'CHARLIEKIRKGRABBER', 'CHECKEREXE', 'CITACIONJUDICIAL', 'CLARO', 'CLIPXDAEMON', 'COMPANIA', 'COMUNICADOCAI', 'CONASET', 'CRESCENTHARVEST', 'DESCKVBRAT', 'DEVMAN', 'DHL', 'DHLSUPLANTACION', 'DLLLOADER324151', 'DRAGONFORCE', 'DRIVERAUDIOLNK', 'ECLIPSERANSOMWARE', 'EGREGOR', 'EMAIL', 'EXTRAL', 'FACTURADEUDA423534A3X', 'FALSAALERTADEDEMANDA', 'FALSAAUDIENCIAJUDICIAL', 'FALSADEMANDA', 'FALSAFACTURA', 'FALSAFACTURAADJUNTA', 'FALSAFACTURAPORVENCER', 'FALSANOTIFICACIONDEDEUDA', 'FALSANOTIFICACIONJUDICIAL', 'FALSANOTIFICACIOUDICIAL', 'FALSOAVISODEPAGO', 'FALSOPAGOOC', 'FISCALIA', 'FOXVEIL', 'FVNCBOT', 'GDSHORTCUT', 'GOLDEYEUUIO', 'GRANDOEIRO', 'GRANDOREIRO', 'GRANDOREIROCOMUNICADOFALSO', 'GRUPOAPT28', 'HATARTAM', 'HORABOT', 'IRAN', 'KEENADU', 'KNIGHTYREMCOS', 'LAZARUS', 'LIMPOPOX32CL', 'LIMPOPOX32MX', 'LIMPOPOX32PE', 'LOCKBIT30RANSOMWARE', 'LTXSTEALER', 'LUMMASTEALER', 'MAQVIRIFX', 'MASSIV', 'MEDUSARANSOMWARE', 'MEKOTIO', 'MIMICRAT', 'MINTRA', 'MTT', 'MUFF', 'NOTEPAD', 'OCRFIX', 'ODYSSEYSTEALER', 'PDI', 'PHANTOMVAI', 'PODERJUDICIAL', 'POSTULACIONLABORAL', 'PROMPTSPY', 'PULSARRAT', 'QILIN', 'RANJUDICIAL', 'RANSERNAC', 'RANSOMWARE', 'RANSOMWARE8BASE', 'RANSOMWAREBLACK', 'RANSOMWAREMARIOLOCKER', 'RANSOMWAREMEDUSALOCKER', 'RAT', 'RENENGINE', 'RHYSIDA', 'RORSCHACH', 'RYUK', 'SERVICIO', 'SERVIPAG', 'SHA256GRANDOEIRO', 'SHA265SHADOWCAMPAIGNS', 'SHABLACKBASTA', 'SHADOWHS', 'SHAQAKBOT', 'SHATGR', 'SII', 'SIILINKPDF', 'SILVER', 'SILVERFOX', 'SLOPPYLEMMING', 'SNAPPYCLIENT', 'SOCELARS', 'SODINOKIBI', 'SOLICITUDDATOSBANCARIOS', 'SSHSTALKER', 'STEAELITERAT', 'SUPERPENSIONES', 'SUPLANTACIONCGE', 'SUPLANTACIONCOASET', 'SUPLANTACIONCONASET', 'SUPLANTACIONSIIYTGR', 'SURXRAT', 'TAXISPY', 'TRIBE', 'TROJANRANSOMWANNACRYPTORA', 'TROJANRANSOMWANNACRYPTORH', 'TS', 'UDECHILE', 'UNC2814', 'VALLEYRAT', 'VIDARSTEALER', 'VOID', 'VORTEXWEREWOLF', 'XWORM', 'ZEROBOT', 'ZERODAYENDELL']);\n\nconst stripAccents = (value) => String(value || '')\n  .normalize('NFD')\n  .replace(/[\\u0300-\\u036f]/g, '');\n\nconst normalizeKnownCandidate = (value) => stripAccents(value)\n  .replace(/^SHA256_/i, '')\n  .toUpperCase()\n  .replace(/[^A-Z0-9_]+/g, ' ')\n  .trim();\n\nconst matchKnownFamily = (value) => {\n  const normalized = normalizeKnownCandidate(value);\n  if (!normalized) {\n    return '';\n  }\n\n  const compact = normalized.replace(/[\\s_]+/g, '');\n  if (KNOWN_FAMILY_CORES.has(compact)) {\n    return compact;\n  }\n\n  const tokens = normalized.split(/\\s+/).filter(Boolean);\n  for (const token of tokens) {\n    const direct = token.replace(/[^A-Z0-9]+/g, '');\n    if (KNOWN_FAMILY_CORES.has(direct)) {\n      return direct;\n    }\n  }\n\n  for (const family of KNOWN_FAMILY_CORES) {\n    if (compact.includes(String(family).replace(/_/g, ''))) {\n      return family;\n    }\n  }\n\n  return '';\n};\n\nconst normalizeThreatCore = (value) => {\n  let text = stripAccents(value)\n    .replace(/^SHA256_/i, '')\n    .toLowerCase()\n    .replace(/[^a-z0-9\\s_-]+/g, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n\n  text = text\n    .replace(/^(nueva|nuevo|nuevas|nuevos)\\s+actividad(?:es)?\\s+del\\s+malware\\s+/i, '')\n    .replace(/^actualizacion\\s+del\\s+troyano\\s+bancario\\s+/i, '')\n    .replace(/^actualizacion\\s+de\\s+/i, '')\n    .replace(/^actividad(?:es)?\\s+del\\s+malware\\s+/i, '')\n    .replace(/^actividad(?:es)?\\s+de\\s+/i, '')\n    .replace(/^troyano\\s+bancario\\s+/i, '')\n    .replace(/^malware\\s+/i, '')\n    .replace(/^amenaza\\s+/i, '')\n    .trim();\n\n  if (/\\bvidar\\b/.test(text) && /\\bstealer\\b/.test(text)) {\n    return 'VIDARSTEALER';\n  }\n\n  if (/\\bhorabot\\b/.test(text)) {\n    return 'HORABOT';\n  }\n\n  const knownFamily = matchKnownFamily(text);\n  if (knownFamily) {\n    return knownFamily;\n  }\n\n  const stopwords = new Set(['de', 'del', 'la', 'el', 'los', 'las', 'y', 'the', 'campaign', 'campana', 'campaigns']);\n  const tokens = text\n    .split(/\\s+/)\n    .map(token => token.trim())\n    .filter(token => token && !stopwords.has(token));\n\n  const compact = tokens.join('').replace(/[^a-z0-9]+/g, '');\n  return compact ? compact.toUpperCase() : 'UNKNOWN';\n};\n\nconst bodyText = String(email?.body_text_merged || '');\nconst subject = String(email?.subject || '');\nconst fullText = `${subject}\\n${bodyText}`;\n\nconst threatPatterns = [\n  /amenaza\\s*[\\r\\n]+([\\s\\S]{0,200}?)(?=\\n\\s*(fecha|bolet[ií]n|descripci[oó]n|indicadores|riesgo|acciones|fuentes)\\b|$)/i,\n  /(?:familia|malware|stealer|troyano|ransomware)\\s*:?\\s*([A-Za-z0-9][A-Za-z0-9 ._\\/-]{2,80})/i,\n];\n\nlet threatSource = '';\nfor (const pattern of threatPatterns) {\n  const match = fullText.match(pattern);\n  if (match?.[1]) {\n    threatSource = match[1];\n    break;\n  }\n}\n\nconst contextThreatName = normalizeThreatCore(threatSource);\n\nconst text = `\nSubject: ${email.subject}\nFrom: ${email.from}\nDate: ${email.date}\nDerived-Threat-Context: ${contextThreatName}\n\n${bodyText}\n`;\n\nreturn {\n  json: {\n    llm_text: text,\n    context_threat_name: contextThreatName\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2288,
+        1392
+      ],
+      "id": "135d59dc-6731-46eb-a38e-f07b2dbe854f",
+      "name": "Extract IoC Input"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "f914658c-aeee-4a90-b353-d080cb89dbfc",
+              "leftValue": "={{$json.llm_text.length}}",
+              "rightValue": 50,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2480,
+        1392
+      ],
+      "id": "59b16220-2dc6-4d51-b299-c09549dabed1",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nlet incoming = [];\nconst MIN_EXPECTED_EXISTING_SHA_COUNT = 1000;\nconst BLOCKLIST_URL = 'PLACEHOLDER_BLOCKLIST_URL';\nconst KNOWN_FAMILY_CORES = new Set(['0APT', '20230901POSIBLESII', '20230915', '7ZIP', 'A0BACKDOOR', 'ACTAJUDICIAL', 'AGENTTESLA', 'AGRICAL', 'AKGUM', 'ALERTA', 'ALFA', 'ALPHV', 'AMARANTHDRAGON', 'APT28', 'APT37', 'APTUAT9244', 'ARKANIXSTEALER', 'AUTOPASE', 'BADIIS', 'BANCODECHILE', 'BANCOESTADO', 'BLACKBASTA', 'BLACKCAT', 'BLACKMATHER', 'BLANCO', 'BORYPTGRAB', 'BOTNETDENETDRAGON', 'BOTNETSYSTEMBC', 'CACTUS', 'CFDIMANAGEREMISION', 'CGE', 'CHARLIEKIRKGRABBER', 'CHECKEREXE', 'CITACIONJUDICIAL', 'CLARO', 'CLIPXDAEMON', 'COMPANIA', 'COMUNICADOCAI', 'CONASET', 'CRESCENTHARVEST', 'DESCKVBRAT', 'DEVMAN', 'DHL', 'DHLSUPLANTACION', 'DLLLOADER324151', 'DRAGONFORCE', 'DRIVERAUDIOLNK', 'ECLIPSERANSOMWARE', 'EGREGOR', 'EMAIL', 'EXTRAL', 'FACTURADEUDA423534A3X', 'FALSAALERTADEDEMANDA', 'FALSAAUDIENCIAJUDICIAL', 'FALSADEMANDA', 'FALSAFACTURA', 'FALSAFACTURAADJUNTA', 'FALSAFACTURAPORVENCER', 'FALSANOTIFICACIONDEDEUDA', 'FALSANOTIFICACIONJUDICIAL', 'FALSANOTIFICACIOUDICIAL', 'FALSOAVISODEPAGO', 'FALSOPAGOOC', 'FISCALIA', 'FOXVEIL', 'FVNCBOT', 'GDSHORTCUT', 'GOLDEYEUUIO', 'GRANDOEIRO', 'GRANDOREIRO', 'GRANDOREIROCOMUNICADOFALSO', 'GRUPOAPT28', 'HATARTAM', 'HORABOT', 'IRAN', 'KEENADU', 'KNIGHTYREMCOS', 'LAZARUS', 'LIMPOPOX32CL', 'LIMPOPOX32MX', 'LIMPOPOX32PE', 'LOCKBIT30RANSOMWARE', 'LTXSTEALER', 'LUMMASTEALER', 'MAQVIRIFX', 'MASSIV', 'MEDUSARANSOMWARE', 'MEKOTIO', 'MIMICRAT', 'MINTRA', 'MTT', 'MUFF', 'NOTEPAD', 'OCRFIX', 'ODYSSEYSTEALER', 'PDI', 'PHANTOMVAI', 'PODERJUDICIAL', 'POSTULACIONLABORAL', 'PROMPTSPY', 'PULSARRAT', 'QILIN', 'RANJUDICIAL', 'RANSERNAC', 'RANSOMWARE', 'RANSOMWARE8BASE', 'RANSOMWAREBLACK', 'RANSOMWAREMARIOLOCKER', 'RANSOMWAREMEDUSALOCKER', 'RAT', 'RENENGINE', 'RHYSIDA', 'RORSCHACH', 'RYUK', 'SERVICIO', 'SERVIPAG', 'SHA256GRANDOEIRO', 'SHA265SHADOWCAMPAIGNS', 'SHABLACKBASTA', 'SHADOWHS', 'SHAQAKBOT', 'SHATGR', 'SII', 'SIILINKPDF', 'SILVER', 'SILVERFOX', 'SLOPPYLEMMING', 'SNAPPYCLIENT', 'SOCELARS', 'SODINOKIBI', 'SOLICITUDDATOSBANCARIOS', 'SSHSTALKER', 'STEAELITERAT', 'SUPERPENSIONES', 'SUPLANTACIONCGE', 'SUPLANTACIONCOASET', 'SUPLANTACIONCONASET', 'SUPLANTACIONSIIYTGR', 'SURXRAT', 'TAXISPY', 'TRIBE', 'TROJANRANSOMWANNACRYPTORA', 'TROJANRANSOMWANNACRYPTORH', 'TS', 'UDECHILE', 'UNC2814', 'VALLEYRAT', 'VIDARSTEALER', 'VOID', 'VORTEXWEREWOLF', 'XWORM', 'ZEROBOT', 'ZERODAYENDELL']);\n\nconst normalizeKnownCandidate = (value) => String(value || '')\n  .normalize('NFD')\n  .replace(/[\\u0300-\\u036f]/g, '')\n  .replace(/^SHA256_/i, '')\n  .toUpperCase()\n  .replace(/[^A-Z0-9_]+/g, ' ')\n  .trim();\n\nconst matchKnownFamily = (value) => {\n  const normalized = normalizeKnownCandidate(value);\n  if (!normalized) {\n    return '';\n  }\n\n  const compact = normalized.replace(/[\\s_]+/g, '');\n  if (KNOWN_FAMILY_CORES.has(compact)) {\n    return compact;\n  }\n\n  const tokens = normalized.split(/\\s+/).filter(Boolean);\n  for (const token of tokens) {\n    const direct = token.replace(/[^A-Z0-9]+/g, '');\n    if (KNOWN_FAMILY_CORES.has(direct)) {\n      return direct;\n    }\n  }\n\n  for (const family of KNOWN_FAMILY_CORES) {\n    if (compact.includes(String(family).replace(/_/g, ''))) {\n      return family;\n    }\n  }\n\n  return '';\n};\n\nconst normalizeThreatCore = (value) => {\n  const rawTag = String(value || '').trim();\n  if (!rawTag) {\n    return 'UNKNOWN';\n  }\n\n  const normalized = rawTag\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/^SHA256_/i, '')\n    .toLowerCase()\n    .replace(/[^a-z0-9]+/g, ' ')\n    .trim();\n\n  if (!normalized || normalized === 'unknown') {\n    return 'UNKNOWN';\n  }\n\n  if (/\\bvidar\\b/.test(normalized) && /\\bstealer\\b/.test(normalized)) {\n    return 'VIDARSTEALER';\n  }\n\n  if (/\\bhorabot\\b/.test(normalized)) {\n    return 'HORABOT';\n  }\n\n  const knownFamily = matchKnownFamily(normalized);\n  if (knownFamily) {\n    return knownFamily;\n  }\n\n  const compact = normalized.replace(/\\s+/g, '');\n  return compact ? compact.toUpperCase() : 'UNKNOWN';\n};\n\nconst canonicalTag = (value) => {\n  const core = normalizeThreatCore(value);\n  return core && core !== 'UNKNOWN' ? `SHA256_${core}` : '';\n};\n\nconst parseExisting = (raw) => {\n  const existing = new Map();\n  for (const line of String(raw || '').split(/\\r?\\n/)) {\n    const match = String(line).trim().match(/^([a-f0-9]{64})\\s+(.+)$/i);\n    if (!match) {\n      continue;\n    }\n    existing.set(match[1].toLowerCase(), canonicalTag(match[2]) || 'SHA256_UNKNOWN');\n  }\n  return existing;\n};\n\nfor (const item of items) {\n  if (Array.isArray(item.json?.sha_lines)) {\n    incoming = item.json.sha_lines\n      .map(x => String(x).trim())\n      .filter(Boolean);\n  }\n}\n\nconst fetched = await this.helpers.httpRequest({\n  method: 'GET',\n  url: BLOCKLIST_URL,\n  headers: { Accept: 'text/plain' },\n});\n\nconst currentRaw = typeof fetched === 'string'\n  ? fetched\n  : typeof fetched?.body === 'string'\n    ? fetched.body\n    : JSON.stringify(fetched);\n\nconst existing = parseExisting(currentRaw);\n\nif (existing.size < MIN_EXPECTED_EXISTING_SHA_COUNT) {\n  throw new Error(`Current blocklist appears unexpectedly small (${existing.size} hashes), abort comparison`);\n}\n\nconst newShaLines = [];\nconst correctedShaLines = [];\n\nfor (const line of incoming) {\n  const match = String(line).trim().match(/^([a-f0-9]{64})\\s+(.+)$/i);\n  if (!match) {\n    continue;\n  }\n\n  const hash = match[1].toLowerCase();\n  const incomingTag = canonicalTag(match[2]);\n\n  if (!incomingTag) {\n    throw new Error(`Incoming SHA256 indicator without canonical threat tag: ${hash}`);\n  }\n\n  const normalizedLine = `${hash} ${incomingTag}`;\n  const existingTag = existing.get(hash);\n\n  if (!existingTag) {\n    newShaLines.push(normalizedLine);\n    continue;\n  }\n\n  if (existingTag !== incomingTag) {\n    correctedShaLines.push(normalizedLine);\n  }\n}\n\nconst actionShaLines = [...newShaLines, ...correctedShaLines];\n\nreturn [{\n  json: {\n    new_sha_lines: newShaLines,\n    corrected_sha_lines: correctedShaLines,\n    action_sha_lines: actionShaLines,\n    new_sha_count: newShaLines.length,\n    corrected_sha_count: correctedShaLines.length,\n    action_sha_count: actionShaLines.length,\n    existing_sha_count: existing.size,\n    current_raw: currentRaw\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3824,
+        1440
+      ],
+      "id": "72bf5089-4c30-4931-97ab-77745c64123c",
+      "name": "Detect New SHA"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "5d64e7ea-a776-493f-9b2f-8eabf3323fdd",
+              "leftValue": "={{$json.action_sha_count}}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        4096,
+        1440
+      ],
+      "id": "a042fc60-6973-471f-a773-045cb54e36ef",
+      "name": "If1"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        3616,
+        1360
+      ],
+      "id": "cbb8d5bd-7f37-4595-b987-629cf42081ce",
+      "name": "Merge Inputs"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        4352,
+        1232
+      ],
+      "id": "89525c54-5959-4034-9592-540d06741235",
+      "name": "Merge Actions"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst results = [];\n\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i];\n  const binaryKeys = Object.keys(item.binary ?? {});\n  const binaryProperty = binaryKeys.includes('data') ? 'data' : binaryKeys[0];\n\n  if (!binaryProperty) {\n    throw new Error(`Input item ${i} does not contain binary data`);\n  }\n\n  const binary = item.binary?.[binaryProperty];\n  const binaryData = binary?.data;\n\n  if (typeof binaryData !== 'string' || !binaryData.length) {\n    throw new Error(`Binary property ${binaryProperty} does not contain inline base64 data`);\n  }\n\n  const buffer = Buffer.from(binaryData, 'base64');\n\n  results.push({\n    json: {\n      current_raw: buffer.toString('utf8')\n    }\n  });\n}\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3424,
+        1264
+      ],
+      "id": "ac571b2f-828b-4055-8d5a-605771ef3d5d",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const socKey = String($node[\"Normalize Mail Payload\"].json.normalized_key || '').trim();\n\nif (!socKey) {\n  throw new Error('Missing normalized source key for archive');\n}\n\nconst socFileName = socKey.split('/').pop();\nconst socTargetKey = socKey.startsWith('normalized/inbox/')\n  ? socKey.replace(/^normalized\\/inbox\\//, 'normalized/processed/')\n  : `normalized/processed/${socFileName}`;\n\nreturn {\n  json: {\n    soc_source_key: socKey,\n    soc_target_key: socTargetKey\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5280,
+        1504
+      ],
+      "id": "5acedff1-2e98-46f0-becf-e82c10083cd7",
+      "name": "Prepare Archive Target"
+    },
+    {
+      "parameters": {
+        "operation": "copy",
+        "sourcePath": "=/PLACEHOLDER_NORMALIZED_BUCKET_NAME/{{$json.soc_source_key}}",
+        "destinationPath": "=/PLACEHOLDER_NORMALIZED_BUCKET_NAME/{{$json.soc_target_key}}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        5520,
+        1504
+      ],
+      "id": "312f5072-053a-4ebe-9e63-785c3fd24efb",
+      "name": "Archive Processed JSON",
+      "credentials": {
+        "aws": {
+          "id": "CONFIGURE_AFTER_IMPORT_AWS_CRED",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "delete",
+        "bucketName": "PLACEHOLDER_NORMALIZED_BUCKET_NAME",
+        "fileKey": "={{ $node[\"Prepare Archive Target\"].json.soc_source_key }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        5760,
+        1504
+      ],
+      "id": "eb629555-c789-4034-9541-8698df7f5bd2",
+      "name": "Delete Processed Inbox JSON",
+      "credentials": {
+        "aws": {
+          "id": "CONFIGURE_AFTER_IMPORT_AWS_CRED",
+          "name": "AWS (IAM) account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Mail Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Mail Payload": {
+      "main": [
+        [
+          {
+            "node": "Extract IoC Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse IoC": {
+      "main": [
+        [
+          {
+            "node": "Merge Inputs",
+            "type": "main",
+            "index": 1
+          },
+          {
+            "node": "Get Blocklist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Blocklist": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Blocklist": {
+      "main": [
+        [
+          {
+            "node": "Merge Actions",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "AWS Bedrock Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain": {
+      "main": [
+        [
+          {
+            "node": "Parse IoC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract IoC Input": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect New SHA": {
+      "main": [
+        [
+          {
+            "node": "If1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If1": {
+      "main": [
+        [
+          {
+            "node": "Merge Actions",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Archive Target",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Inputs": {
+      "main": [
+        [
+          {
+            "node": "Detect New SHA",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Blocklist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Actions": {
+      "main": [
+        [
+          {
+            "node": "Write Blocklist",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Corporate Mail Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Corporate Mail Payload": {
+      "main": [
+        [
+          {
+            "node": "Corporate Mail Queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "Merge Inputs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Archive Target": {
+      "main": [
+        [
+          {
+            "node": "Archive Processed JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Blocklist": {
+      "main": [
+        [
+          {
+            "node": "Prepare Archive Target",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Archive Processed JSON": {
+      "main": [
+        [
+          {
+            "node": "Delete Processed Inbox JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "04c2eb4f-aee8-41c7-9551-8a30cbe33303",
+  "meta": {
+    "instanceId": "61e8ffdf70f7e7470bda3b1b1cdea1f0ac31372175670632905cc3a9df825f76"
+  },
+  "id": "PO_sc_bt8tF3Cs58LE8bZ",
+  "tags": []
+}

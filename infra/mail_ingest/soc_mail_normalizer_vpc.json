@@ -1,0 +1,6 @@
+{
+  "VpcConfig": {
+    "SubnetIds": ["PLACEHOLDER_PRIVATE_SUBNET_1", "PLACEHOLDER_PRIVATE_SUBNET_2"],
+    "SecurityGroupIds": ["PLACEHOLDER_NORMALIZER_LAMBDA_SG_ID"]
+  }
+}

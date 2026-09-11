@@ -1,0 +1,16 @@
+{
+  "GroupId": "PLACEHOLDER_ALB_SG_ID",
+  "IpPermissions": [
+    {
+      "IpProtocol": "tcp",
+      "FromPort": 443,
+      "ToPort": 443,
+      "IpRanges": [
+        {
+          "CidrIp": "PLACEHOLDER_NAT_GW_IP_A/32",
+          "Description": "Allow n8n webhook from NAT A"
+        }
+      ]
+    }
+  ]
+}

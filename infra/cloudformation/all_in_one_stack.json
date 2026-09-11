@@ -1,0 +1,3476 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "All-in-one SOC boletines stack. Combina n8n (ECS Fargate + ALB + RDS + Redis + WAF), ingesta de correo (SES inbound + S3 raw/normalized + Lambdas guard/normalizer) y sender simplificado (SQS + Lambda SES) en un unico stack independiente.",
+  "Parameters": {
+    "N8nHostedZone": {
+      "Type": "AWS::Route53::HostedZone::Id",
+      "Description": "Zona hospedada seleccionada para acceder a n8n. https://docs.n8n.io/hosting/configuration/environment-variables/deployment/",
+      "AllowedPattern": "Z.+",
+      "ConstraintDescription": "Debe seleccionar una zona hospedada para continuar"
+    },
+    "N8nHostRecordName": {
+      "Type": "String",
+      "Description": "Ingrese el nombre de host que coincide con la zona hospedada seleccionada. Debe coincidir con el ARN del certificado.",
+      "AllowedPattern": ".+",
+      "ConstraintDescription": "Ingrese un nombre de registro host para continuar.",
+      "Default": "ENTER-YOUR-HOST-RECORD-HERE"
+    },
+    "N8nCertArn": {
+      "Type": "String",
+      "Description": "Pegue el ARN del certificado asociado a su zona hospedada. DEBE ESTAR EN LA MISMA REGION QUE EL STACK.",
+      "Default": "ENTER-YOUR-CERT-ARN-HERE"
+    },
+    "AllowedIngressCidr": {
+      "Type": "String",
+      "Default": "",
+      "Description": "IP publica de salida autorizada para acceder a n8n (oficina/VPN). Se usa en el SG del ALB y en la lista de permitidos del WAF. Ejemplo: 203.0.113.1/32"
+    },
+    "WafRateLimit": {
+      "Type": "Number",
+      "Default": 2000,
+      "Description": "Limite de tasa del WAF (solicitudes por 5 minutos) para IP permitidas. Las solicitudes sobre este valor se bloquean."
+    },
+    "WafLogRetentionDays": {
+      "Type": "Number",
+      "Default": 30,
+      "Description": "Retencion en dias para el log group del WAF en CloudWatch Logs."
+    },
+    "HashfwWAFArn": {
+      "Type": "String",
+      "Default": "",
+      "Description": "ARN del WAF CloudFront para la distribucion hashfw. Gestionado manualmente (AWSManagedRulesAntiDDoSRuleSet requiere ManagedRuleGroupConfig no soportado por CFN schema). Ejemplo: arn:aws:wafv2:us-east-1:ACCOUNT_ID:global/webacl/NAME/UUID"
+    },
+    "ExistingVpcId": {
+      "Type": "AWS::EC2::VPC::Id",
+      "Description": "VPC existente donde desplegar n8n"
+    },
+    "ExistingPublicSubnetIds": {
+      "Type": "List<AWS::EC2::Subnet::Id>",
+      "Description": "Subnets PUBLICAS existentes para ALB"
+    },
+    "ExistingPrivateSubnetIds": {
+      "Type": "List<AWS::EC2::Subnet::Id>",
+      "Description": "Subnets PRIVADAS existentes para ECS/RDS"
+    },
+    "WebhookNatCidrA": {
+      "Type": "String",
+      "Description": "IP del NAT Gateway de tu VPC en notacion CIDR /32. El ALB y el WAF solo aceptan el webhook de SES desde esta IP. Obtenla con: aws ec2 describe-nat-gateways --query NatGateways[*].NatGatewayAddresses[0].PublicIp",
+      "AllowedPattern": "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}/32$",
+      "ConstraintDescription": "Debe ser una IP publica en formato x.x.x.x/32"
+    },
+    "WebhookNatCidrB": {
+      "Type": "String",
+      "Description": "Segunda IP NAT Gateway /32 (si tienes dos NATs en AZs distintas). Si usas un solo NAT, repite el valor de WebhookNatCidrA.",
+      "AllowedPattern": "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}/32$",
+      "ConstraintDescription": "Debe ser una IP publica en formato x.x.x.x/32"
+    },
+    "DBInstanceClass": {
+      "Type": "String",
+      "Description": "Clase de instancia para PostgreSQL de n8n",
+      "Default": "db.t4g.small",
+      "AllowedValues": [
+        "db.t4g.micro",
+        "db.t4g.small",
+        "db.t4g.medium",
+        "db.m7g.large",
+        "db.m7g.xlarge",
+        "db.m7g.2xlarge"
+      ]
+    },
+    "DBAllocatedStorage": {
+      "Type": "Number",
+      "Default": 70,
+      "MinValue": 20,
+      "Description": "Almacenamiento en GiB (el minimo habitual para RDS es 20 GiB)"
+    },
+    "DBMaxAllocatedStorage": {
+      "Type": "Number",
+      "Default": 100,
+      "MinValue": 20,
+      "Description": "Almacenamiento maximo en GiB para el autoescalado de RDS"
+    },
+    "MasterUsername": {
+      "Type": "String",
+      "Default": "postgres",
+      "Description": "Nombre de usuario maestro (administrador)",
+      "AllowedPattern": "^[a-zA-Z][a-zA-Z0-9_]{0,15}$"
+    },
+    "MasterUserPassword": {
+      "Type": "String",
+      "NoEcho": true,
+      "Description": "Contrasena del usuario administrador. Parametro obligatorio; no dejar valores de ejemplo en despliegues reales.",
+      "MinLength": 8
+    },
+    "DBName": {
+      "Type": "String",
+      "Default": "n8n",
+      "Description": "Base de datos inicial a crear",
+      "AllowedPattern": "^[a-zA-Z][a-zA-Z0-9_]{0,62}$"
+    },
+    "RedisInstanceClass": {
+      "Type": "String",
+      "Description": "Clase de instancia para Redis de n8n",
+      "Default": "cache.t4g.small",
+      "AllowedValues": [
+        "cache.t4g.micro",
+        "cache.t4g.small",
+        "cache.t4g.medium",
+        "cache.m4.large",
+        "cache.m4.xlarge",
+        "cache.m4.2xlarge"
+      ]
+    },
+    "RedisPassword": {
+      "Type": "String",
+      "NoEcho": true,
+      "Description": "Contrasena del usuario 'default' de Redis. Parametro obligatorio; debe tener al menos 16 caracteres.",
+      "AllowedPattern": ".{16}.*"
+    },
+    "RedisReplicationGroupSuffix": {
+      "Type": "String",
+      "Default": "v2",
+      "AllowedPattern": "[a-z0-9-]+",
+      "Description": "Sufijo para el ReplicationGroupId de Redis. Cambielo cuando CloudFormation requiera reemplazar un recurso Redis con nombre."
+    },
+    "TaskCpu": {
+      "Type": "String",
+      "Default": "512",
+      "AllowedPattern": "[0-9]+",
+      "Description": "Unidades de CPU para las tareas ECS de n8n (main y worker). Aumente este valor cuando necesite mas capacidad."
+    },
+    "TaskMemory": {
+      "Type": "String",
+      "Default": "2048",
+      "AllowedPattern": "[0-9]+",
+      "Description": "Memoria (MiB) para las tareas ECS de n8n (main y worker). Debe ser compatible con TaskCpu en Fargate."
+    },
+    "N8nEphemeralStorageGiB": {
+      "Type": "Number",
+      "Default": 40,
+      "MinValue": 21,
+      "MaxValue": 200,
+      "Description": "Almacenamiento efimero (GiB) de las tareas Fargate de n8n (main y worker). El default de Fargate (20 GiB) puede agotarse si N8N_DEFAULT_BINARY_DATA_MODE=filesystem procesa adjuntos o listas grandes; se sube el default a 40 GiB por experiencia real en produccion."
+    },
+    "N8nExecutionsDataPrune": {
+      "Type": "String",
+      "Default": "true",
+      "AllowedValues": [
+        "true",
+        "false"
+      ],
+      "Description": "Habilita la poda automatica de ejecuciones antiguas de n8n (EXECUTIONS_DATA_PRUNE). Evita que RDS crezca sin limite con el historial de ejecuciones."
+    },
+    "N8nExecutionsDataMaxAgeHours": {
+      "Type": "String",
+      "Default": "336",
+      "AllowedPattern": "[0-9]+",
+      "Description": "Antiguedad maxima (horas) de las ejecuciones que se conservan antes de podarse (EXECUTIONS_DATA_MAX_AGE). Default 336 = 14 dias; ajustar segun el requisito de retencion de la institucion."
+    },
+    "N8nLicenseKey": {
+      "Type": "String",
+      "Description": "Ingrese la clave de licencia enterprise de n8n.",
+      "Default": "12345678-0987-1234-5678-123456789012",
+      "AllowedPattern": "^[a-z0-9]{8}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}$"
+    },
+    "N8nTenantId": {
+      "Type": "String",
+      "Description": "[Solo embed] Ingrese el tenant ID de n8n. Mantenga el valor por defecto para una instalacion estandar.",
+      "Default": 1,
+      "AllowedPattern": "^[0-9]+$"
+    },
+    "BitdefenderSecretName": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Ruta en Secrets Manager para credenciales Bitdefender GravityZone (apiKey y companyId). Formato recomendado: STACK_NAME/bitdefendergravityzone (reemplaza STACK_NAME por el nombre del stack que usaras). Dejar vacio si no se usa la integracion Bitdefender."
+    },
+    "BitdefenderIncidentsV12Url": {
+      "Type": "String",
+      "Default": "https://cloud.gravityzone.bitdefender.com/api/v1.2/jsonrpc/incidents",
+      "Description": "Endpoint Incidents API v1.2 de Bitdefender GravityZone."
+    },
+    "BitdefenderLicensingV10Url": {
+      "Type": "String",
+      "Default": "https://cloud.gravityzone.bitdefender.com/api/v1.0/jsonrpc/licensing",
+      "Description": "Endpoint Licensing API v1.0 de Bitdefender GravityZone."
+    },
+    "BitdefenderStateBucketName": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Bucket S3 donde vive hash_sha256.txt y el estado de sincronizacion de Bitdefender. Ejemplo: ioc-ACCOUNT_ID-us-east-1"
+    },
+    "ObservabilidadWAFArn": {
+      "Type": "String",
+      "Default": "",
+      "Description": "ARN del WAF CloudFront para la distribucion de observabilidad. Gestionado manualmente (AWSManagedRulesAntiDDoSRuleSet requiere ManagedRuleGroupConfig no soportado por CFN schema). Ejemplo: arn:aws:wafv2:us-east-1:ACCOUNT_ID:global/webacl/NAME/UUID"
+    },
+    "SecretsManagerEndpointSGId": {
+      "Type": "String",
+      "Default": "",
+      "Description": "ID del Security Group del VPC Interface Endpoint de Secrets Manager en la VPC compartida. Permite que las tasks n8n accedan a Secrets Manager al arrancar. Ejemplo: sg-0123456789abcdef0"
+    },
+    "IocCertArn": {
+      "Type": "String",
+      "Default": "",
+      "Description": "ARN del certificado ACM (us-east-1) para el dominio IocDomainName. Ejemplo: arn:aws:acm:us-east-1:ACCOUNT_ID:certificate/UUID"
+    },
+    "IocHostedZoneId": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Hosted Zone ID de Route53 que contiene el registro para IocDomainName. Ejemplo: Z04156052OOWFIA8EYEKG"
+    },
+    "N8nImageUri": {
+      "Type": "String",
+      "Default": "n8nio/n8n:latest",
+      "Description": "URI de la imagen Docker de n8n. Por defecto usa DockerHub oficial. Para ECR propio usar: ACCOUNT.dkr.ecr.REGION.amazonaws.com/n8n/n8n:latest"
+    },
+    "AlbAccessLogsBucketName": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Nombre del bucket S3 existente para access logs del ALB. Dejar vacio para deshabilitar access logs."
+    },
+    "HashfwOriginBucketName": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Nombre del bucket S3 que sirve como origen del CloudFront de blocklist (hashfw). Normalmente igual a BitdefenderStateBucketName. Dejar vacio para no crear la distribucion CloudFront hashfw."
+    },
+    "HashfwDomainName": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Nombre de dominio publico para servir la blocklist via CloudFront (ej: hashfw.ejemplo.cl). Requiere HashfwOriginBucketName y HashfwCertArn."
+    },
+    "HashfwCertArn": {
+      "Type": "String",
+      "Default": "",
+      "Description": "ARN del certificado ACM (us-east-1) para HashfwDomainName."
+    },
+    "IocDomainName": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Nombre de dominio publico para servir el feed IOC via CloudFront (ej: ioc.ejemplo.ai). Requiere IocCertArn y IocHostedZoneId."
+    },
+    "IngestEmailAddress": {
+      "Type": "String",
+      "Description": "Direccion de correo donde llegan los boletines (ej: soc-ingest@mailing.ejemplo.cl)."
+    },
+    "AllowedSenderDomains": {
+      "Type": "String",
+      "Description": "Dominios remitentes permitidos, separados por coma."
+    },
+    "RawBucketName": {
+      "Type": "String",
+      "Description": "Nombre del bucket S3 para correos crudos RFC 5322."
+    },
+    "NormalizedBucketName": {
+      "Type": "String",
+      "Description": "Nombre del bucket S3 para correos normalizados JSON."
+    },
+    "WebhookUrl": {
+      "Type": "String",
+      "Description": "URL del webhook n8n (ej: https://n8n.ejemplo.cl/webhook/soc/boletines-csoc-ingest)."
+    },
+    "WebhookBasicUser": {
+      "Type": "String",
+      "Description": "Usuario Basic Auth para el webhook."
+    },
+    "WebhookBasicPassword": {
+      "Type": "String",
+      "NoEcho": true,
+      "Description": "Password Basic Auth para el webhook."
+    },
+    "WebhookRequired": {
+      "Type": "String",
+      "Default": "false",
+      "AllowedValues": [
+        "true",
+        "false"
+      ],
+      "Description": "Si true, falla cuando el webhook no responde."
+    },
+    "DispatchPrefix": {
+      "Type": "String",
+      "Default": "normalized/dispatched/",
+      "Description": "Prefix S3 para marcar mensajes despachados."
+    },
+    "WebhookTimeoutSeconds": {
+      "Type": "String",
+      "Default": "10",
+      "Description": "Timeout del webhook en segundos."
+    },
+    "VpcSubnetIds": {
+      "Type": "CommaDelimitedList",
+      "Description": "Subnets privadas para Lambda normalizer (vacio para sin VPC). Pasar lista vacia o subnet IDs."
+    },
+    "LambdaSecurityGroupId": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Security Group para Lambda normalizer en VPC. Vacio = Lambda sin VPC."
+    },
+    "ExistingReceiptRuleSet": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Nombre del SES Receipt Rule Set existente. Vacio = crear uno nuevo."
+    },
+    "SesFromAddress": {
+      "Type": "String",
+      "Description": "Direccion de correo del remitente SOC (ej: soc-bot@mailing.ejemplo.cl)."
+    },
+    "SesIdentityArn": {
+      "Type": "String",
+      "Description": "ARN de la identidad SES verificada para el remitente. Ej: arn:aws:ses:REGION:ACCOUNT:identity/dominio.cl"
+    },
+    "NotificationToAddresses": {
+      "Type": "String",
+      "Description": "Destinatarios principales del correo SOC, separados por coma."
+    },
+    "NotificationCcAddresses": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Destinatarios en copia (CC), separados por coma. Puede dejarse vacio."
+    },
+    "MunicipalityName": {
+      "Type": "String",
+      "Description": "Nombre de la institucion (usado en el cuerpo del correo)."
+    },
+    "MunicipalityLogoUrl": {
+      "Type": "String",
+      "Default": "",
+      "Description": "URL del logo para el template HTML."
+    },
+    "MunicipalityUrl": {
+      "Type": "String",
+      "Default": "",
+      "Description": "URL del sitio web."
+    },
+    "MailTemplateBucketName": {
+      "Type": "String",
+      "Description": "Nombre del bucket S3 donde se almacena el template HTML del correo SOC. Puede ser igual a un bucket ya existente del stack o uno separado."
+    },
+    "MailTemplateKey": {
+      "Type": "String",
+      "Default": "templates/soc_ioc_notification_v1.html",
+      "Description": "Ruta (key) del template HTML dentro del bucket MailTemplateBucketName."
+    }
+  },
+  "Conditions": {
+    "EnableAlbAccessLogs": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "AlbAccessLogsBucketName"
+            },
+            ""
+          ]
+        }
+      ]
+    },
+    "CreateHashfwCloudFront": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "HashfwOriginBucketName"
+            },
+            ""
+          ]
+        }
+      ]
+    },
+    "UseNewRuleSet": {
+      "Fn::Equals": [
+        {
+          "Ref": "ExistingReceiptRuleSet"
+        },
+        ""
+      ]
+    },
+    "UseVpcConfig": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "LambdaSecurityGroupId"
+            },
+            ""
+          ]
+        }
+      ]
+    }
+  },
+  "Metadata": {
+    "AWS::CloudFormation::Interface": {
+      "ParameterGroups": [
+        {
+          "Label": {
+            "default": "n8n License Config"
+          },
+          "Parameters": [
+            "N8nLicenseKey",
+            "N8nTenantId"
+          ]
+        },
+        {
+          "Label": {
+            "default": "DNS Config"
+          },
+          "Parameters": [
+            "N8nHostedZone",
+            "N8nCertArn",
+            "N8nHostRecordName"
+          ]
+        },
+        {
+          "Label": {
+            "default": "VPC & Network Config"
+          },
+          "Parameters": [
+            "ExistingVpcId",
+            "ExistingPublicSubnetIds",
+            "ExistingPrivateSubnetIds"
+          ]
+        },
+        {
+          "Label": {
+            "default": "Postgres DB Config"
+          },
+          "Parameters": [
+            "DBInstanceClass",
+            "MasterUsername",
+            "MasterUserPassword",
+            "DBAllocatedStorage",
+            "DBMaxAllocatedStorage",
+            "DBName"
+          ]
+        },
+        {
+          "Label": {
+            "default": "Redis Config"
+          },
+          "Parameters": [
+            "RedisInstanceClass",
+            "RedisPassword",
+            "RedisReplicationGroupSuffix"
+          ]
+        },
+        {
+          "Label": {
+            "default": "ECS Task Config"
+          },
+          "Parameters": [
+            "TaskCpu",
+            "TaskMemory",
+            "N8nEphemeralStorageGiB",
+            "N8nExecutionsDataPrune",
+            "N8nExecutionsDataMaxAgeHours"
+          ]
+        },
+        {
+          "Label": {
+            "default": "Mail Ingest (SES inbound + S3 + Lambdas)"
+          },
+          "Parameters": [
+            "IngestEmailAddress",
+            "AllowedSenderDomains",
+            "RawBucketName",
+            "NormalizedBucketName",
+            "WebhookUrl",
+            "WebhookBasicUser",
+            "WebhookBasicPassword",
+            "WebhookRequired",
+            "DispatchPrefix",
+            "WebhookTimeoutSeconds",
+            "VpcSubnetIds",
+            "LambdaSecurityGroupId",
+            "ExistingReceiptRuleSet"
+          ]
+        },
+        {
+          "Label": {
+            "default": "SOC Mail Sender (SQS + Lambda SES)"
+          },
+          "Parameters": [
+            "SesFromAddress",
+            "SesIdentityArn",
+            "NotificationToAddresses",
+            "NotificationCcAddresses",
+            "MunicipalityName",
+            "MunicipalityLogoUrl",
+            "MunicipalityUrl",
+            "MailTemplateBucketName",
+            "MailTemplateKey"
+          ]
+        }
+      ]
+    }
+  },
+  "Resources": {
+    "N8nLicenseSecret": {
+      "Type": "AWS::SecretsManager::Secret",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}/n8nlicense"
+        },
+        "Description": "Clave de licencia enterprise de n8n",
+        "SecretString": {
+          "Fn::Sub": "{\n  \"LicenseKey\": \"${N8nLicenseKey}\",\n  \"TenantId\": \"${N8nTenantId}\"\n}\n"
+        }
+      }
+    },
+    "N8nEncryptionKey": {
+      "Type": "AWS::SecretsManager::Secret",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}/encryptionkey"
+        },
+        "Description": "Clave de cifrado para el modo cola",
+        "SecretString": {
+          "Fn::Select": [
+            2,
+            {
+              "Fn::Split": [
+                "/",
+                {
+                  "Ref": "AWS::StackId"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "ALBSecGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "default VPC security group",
+        "VpcId": {
+          "Ref": "ExistingVpcId"
+        },
+        "GroupName": {
+          "Fn::Sub": "${AWS::StackName}-alb-sg"
+        },
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 80,
+            "ToPort": 80,
+            "CidrIp": {
+              "Ref": "AllowedIngressCidr"
+            },
+            "Description": "Allow HTTP (redirect) only from AllowedIngressCidr"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 443,
+            "ToPort": 443,
+            "CidrIp": {
+              "Ref": "WebhookNatCidrA"
+            },
+            "Description": "Allow n8n webhook from NAT A"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 443,
+            "ToPort": 443,
+            "CidrIp": {
+              "Ref": "WebhookNatCidrB"
+            },
+            "Description": "Allow n8n webhook from NAT B"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 443,
+            "ToPort": 443,
+            "CidrIp": {
+              "Ref": "AllowedIngressCidr"
+            },
+            "Description": "Allow HTTPS only from AllowedIngressCidr"
+          }
+        ]
+      }
+    },
+    "ALBTaskEgress": {
+      "Type": "AWS::EC2::SecurityGroupEgress",
+      "Properties": {
+        "GroupId": {
+          "Ref": "ALBSecGroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 5678,
+        "ToPort": 5678,
+        "DestinationSecurityGroupId": {
+          "Ref": "TaskSecGroupMain"
+        }
+      }
+    },
+    "ElasticLoadBalancingV2LoadBalancer": {
+      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}-alb"
+        },
+        "Scheme": "internet-facing",
+        "Type": "application",
+        "Subnets": {
+          "Ref": "ExistingPublicSubnetIds"
+        },
+        "SecurityGroups": [
+          {
+            "Ref": "ALBSecGroup"
+          }
+        ],
+        "IpAddressType": "ipv4",
+        "LoadBalancerAttributes": [
+          {
+            "Key": "access_logs.s3.enabled",
+            "Value": {
+              "Fn::If": [
+                "EnableAlbAccessLogs",
+                "true",
+                "false"
+              ]
+            }
+          },
+          {
+            "Key": "access_logs.s3.bucket",
+            "Value": {
+              "Fn::If": [
+                "EnableAlbAccessLogs",
+                {
+                  "Ref": "AlbAccessLogsBucketName"
+                },
+                ""
+              ]
+            }
+          },
+          {
+            "Key": "access_logs.s3.prefix",
+            "Value": "internet-monitor/elb"
+          },
+          {
+            "Key": "idle_timeout.timeout_seconds",
+            "Value": "60"
+          },
+          {
+            "Key": "deletion_protection.enabled",
+            "Value": "false"
+          },
+          {
+            "Key": "routing.http2.enabled",
+            "Value": "true"
+          },
+          {
+            "Key": "routing.http.drop_invalid_header_fields.enabled",
+            "Value": "false"
+          },
+          {
+            "Key": "routing.http.xff_client_port.enabled",
+            "Value": "false"
+          },
+          {
+            "Key": "routing.http.preserve_host_header.enabled",
+            "Value": "false"
+          },
+          {
+            "Key": "routing.http.xff_header_processing.mode",
+            "Value": "append"
+          },
+          {
+            "Key": "load_balancing.cross_zone.enabled",
+            "Value": "true"
+          },
+          {
+            "Key": "routing.http.desync_mitigation_mode",
+            "Value": "defensive"
+          },
+          {
+            "Key": "client_keep_alive.seconds",
+            "Value": "3600"
+          },
+          {
+            "Key": "waf.fail_open.enabled",
+            "Value": "false"
+          },
+          {
+            "Key": "routing.http.x_amzn_tls_version_and_cipher_suite.enabled",
+            "Value": "false"
+          },
+          {
+            "Key": "zonal_shift.config.enabled",
+            "Value": "false"
+          },
+          {
+            "Key": "connection_logs.s3.enabled",
+            "Value": "false"
+          }
+        ]
+      }
+    },
+    "WafIpSetAllowMuni": {
+      "Type": "AWS::WAFv2::IPSet",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}-ipset-allow-muni"
+        },
+        "Scope": "REGIONAL",
+        "IPAddressVersion": "IPV4",
+        "Addresses": [
+          {
+            "Ref": "WebhookNatCidrA"
+          },
+          {
+            "Ref": "WebhookNatCidrB"
+          },
+          {
+            "Ref": "AllowedIngressCidr"
+          }
+        ],
+        "Description": "Lista de permitidos del ALB de n8n para salida municipal y VPN"
+      }
+    },
+    "WafWebAcl": {
+      "Type": "AWS::WAFv2::WebACL",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}-waf"
+        },
+        "Scope": "REGIONAL",
+        "DefaultAction": {
+          "Allow": {}
+        },
+        "Description": "WAF del ALB de n8n con lista de permitidos, reglas administradas y limite de tasa",
+        "VisibilityConfig": {
+          "CloudWatchMetricsEnabled": true,
+          "MetricName": {
+            "Fn::Sub": "${AWS::StackName}-waf"
+          },
+          "SampledRequestsEnabled": true
+        },
+        "Rules": [
+          {
+            "Name": "BlockNotInAllowlist",
+            "Priority": 0,
+            "Action": {
+              "Block": {}
+            },
+            "Statement": {
+              "NotStatement": {
+                "Statement": {
+                  "IPSetReferenceStatement": {
+                    "Arn": {
+                      "Fn::GetAtt": [
+                        "WafIpSetAllowMuni",
+                        "Arn"
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "VisibilityConfig": {
+              "CloudWatchMetricsEnabled": true,
+              "MetricName": "BlockNotInAllowlist",
+              "SampledRequestsEnabled": true
+            }
+          },
+          {
+            "Name": "RateLimitAllowedIP",
+            "Priority": 1,
+            "Action": {
+              "Block": {}
+            },
+            "Statement": {
+              "RateBasedStatement": {
+                "AggregateKeyType": "IP",
+                "Limit": {
+                  "Ref": "WafRateLimit"
+                },
+                "EvaluationWindowSec": 300,
+                "ScopeDownStatement": {
+                  "IPSetReferenceStatement": {
+                    "Arn": {
+                      "Fn::GetAtt": [
+                        "WafIpSetAllowMuni",
+                        "Arn"
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "VisibilityConfig": {
+              "CloudWatchMetricsEnabled": true,
+              "MetricName": "RateLimitAllowedIP",
+              "SampledRequestsEnabled": true
+            }
+          },
+          {
+            "Name": "AWSManagedRulesCommonRuleSet",
+            "Priority": 10,
+            "OverrideAction": {
+              "None": {}
+            },
+            "Statement": {
+              "ManagedRuleGroupStatement": {
+                "VendorName": "AWS",
+                "Name": "AWSManagedRulesCommonRuleSet",
+                "RuleActionOverrides": [
+                  {
+                    "Name": "SizeRestrictions_BODY",
+                    "ActionToUse": {
+                      "Count": {}
+                    }
+                  }
+                ]
+              }
+            },
+            "VisibilityConfig": {
+              "CloudWatchMetricsEnabled": true,
+              "MetricName": "AWSManagedRulesCommonRuleSet",
+              "SampledRequestsEnabled": true
+            }
+          },
+          {
+            "Name": "AWSManagedRulesKnownBadInputsRuleSet",
+            "Priority": 11,
+            "OverrideAction": {
+              "None": {}
+            },
+            "Statement": {
+              "ManagedRuleGroupStatement": {
+                "VendorName": "AWS",
+                "Name": "AWSManagedRulesKnownBadInputsRuleSet"
+              }
+            },
+            "VisibilityConfig": {
+              "CloudWatchMetricsEnabled": true,
+              "MetricName": "AWSManagedRulesKnownBadInputsRuleSet",
+              "SampledRequestsEnabled": true
+            }
+          }
+        ]
+      }
+    },
+    "WafWebAclAssociation": {
+      "Type": "AWS::WAFv2::WebACLAssociation",
+      "Properties": {
+        "ResourceArn": {
+          "Ref": "ElasticLoadBalancingV2LoadBalancer"
+        },
+        "WebACLArn": {
+          "Fn::GetAtt": [
+            "WafWebAcl",
+            "Arn"
+          ]
+        }
+      }
+    },
+    "WafLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "aws-waf-logs-${AWS::StackName}"
+        },
+        "RetentionInDays": {
+          "Ref": "WafLogRetentionDays"
+        }
+      }
+    },
+    "WafLogResourcePolicy": {
+      "Type": "AWS::Logs::ResourcePolicy",
+      "Properties": {
+        "PolicyName": {
+          "Fn::Sub": "AWSWAFLoggingPolicy-${AWS::StackName}"
+        },
+        "PolicyDocument": {
+          "Fn::Sub": "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n    {\n      \"Sid\": \"AWSWAFLoggingPermissions\",\n      \"Effect\": \"Allow\",\n      \"Principal\": { \"Service\": \"delivery.logs.amazonaws.com\" },\n      \"Action\": [\n        \"logs:CreateLogStream\",\n        \"logs:PutLogEvents\"\n      ],\n      \"Resource\": \"${WafLogGroup.Arn}:*\"\n    }\n  ]\n}\n"
+        }
+      }
+    },
+    "WafLoggingConfiguration": {
+      "Type": "AWS::WAFv2::LoggingConfiguration",
+      "DependsOn": "WafLogResourcePolicy",
+      "Properties": {
+        "ResourceArn": {
+          "Fn::GetAtt": [
+            "WafWebAcl",
+            "Arn"
+          ]
+        },
+        "LogDestinationConfigs": [
+          {
+            "Fn::GetAtt": [
+              "WafLogGroup",
+              "Arn"
+            ]
+          }
+        ]
+      }
+    },
+    "HttpAppTargetGroup": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}-alb-tg"
+        },
+        "VpcId": {
+          "Ref": "ExistingVpcId"
+        },
+        "Protocol": "HTTP",
+        "Port": 5678,
+        "TargetType": "ip",
+        "IpAddressType": "ipv4",
+        "ProtocolVersion": "HTTP1",
+        "HealthCheckEnabled": true,
+        "HealthCheckProtocol": "HTTP",
+        "HealthCheckPort": 5678,
+        "HealthCheckIntervalSeconds": 60,
+        "HealthCheckTimeoutSeconds": 30,
+        "HealthyThresholdCount": 8,
+        "UnhealthyThresholdCount": 5,
+        "HealthCheckPath": "/",
+        "Matcher": {
+          "HttpCode": "200-399"
+        }
+      }
+    },
+    "ElasticLoadBalancingV2Listener2": {
+      "Type": "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties": {
+        "LoadBalancerArn": {
+          "Ref": "ElasticLoadBalancingV2LoadBalancer"
+        },
+        "Port": 443,
+        "Protocol": "HTTPS",
+        "SslPolicy": "ELBSecurityPolicy-TLS13-1-2-2021-06",
+        "Certificates": [
+          {
+            "CertificateArn": {
+              "Ref": "N8nCertArn"
+            }
+          }
+        ],
+        "DefaultActions": [
+          {
+            "Order": 1,
+            "TargetGroupArn": {
+              "Ref": "HttpAppTargetGroup"
+            },
+            "Type": "forward"
+          }
+        ]
+      }
+    },
+    "ElasticLoadBalancingV2Listener3": {
+      "Type": "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties": {
+        "LoadBalancerArn": {
+          "Ref": "ElasticLoadBalancingV2LoadBalancer"
+        },
+        "Port": 80,
+        "Protocol": "HTTP",
+        "DefaultActions": [
+          {
+            "Order": 1,
+            "Type": "redirect",
+            "RedirectConfig": {
+              "Protocol": "HTTPS",
+              "Port": 443,
+              "StatusCode": "HTTP_301"
+            }
+          }
+        ]
+      }
+    },
+    "N8nHostRecord": {
+      "Type": "AWS::Route53::RecordSet",
+      "Properties": {
+        "Name": {
+          "Ref": "N8nHostRecordName"
+        },
+        "HostedZoneId": {
+          "Ref": "N8nHostedZone"
+        },
+        "Type": "A",
+        "AliasTarget": {
+          "DNSName": {
+            "Fn::GetAtt": [
+              "ElasticLoadBalancingV2LoadBalancer",
+              "DNSName"
+            ]
+          },
+          "HostedZoneId": {
+            "Fn::GetAtt": [
+              "ElasticLoadBalancingV2LoadBalancer",
+              "CanonicalHostedZoneID"
+            ]
+          },
+          "EvaluateTargetHealth": false
+        }
+      }
+    },
+    "S3BinaryBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "VersioningConfiguration": {
+          "Status": "Enabled"
+        },
+        "BucketName": {
+          "Fn::Sub": "${AWS::StackName}-n8n-bin"
+        }
+      }
+    },
+    "S3BucketPolicy": {
+      "DependsOn": [
+        "N8nTaskRole"
+      ],
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "S3BinaryBucket"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowS3UserFullAccess",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "N8nTaskRole",
+                    "Arn"
+                  ]
+                }
+              },
+              "Action": [
+                "s3:GetBucketLocation",
+                "s3:ListBucket"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:aws:s3:::${S3BinaryBucket}"
+              }
+            },
+            {
+              "Sid": "AllowS3UserFullAccessToObjects",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "N8nTaskRole",
+                    "Arn"
+                  ]
+                }
+              },
+              "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:DeleteObject"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:aws:s3:::${S3BinaryBucket}/*"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "RDSSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupName": {
+          "Fn::Sub": "${AWS::StackName}-rds-sg"
+        },
+        "GroupDescription": "Allow PostgreSQL access to RDS on 5432",
+        "VpcId": {
+          "Ref": "ExistingVpcId"
+        }
+      }
+    },
+    "RDSSecGroupIngressMain": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "GroupId": {
+          "Ref": "RDSSecurityGroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 5432,
+        "ToPort": 5432,
+        "SourceSecurityGroupId": {
+          "Ref": "TaskSecGroupMain"
+        }
+      }
+    },
+    "RDSSecGroupIngressWorker": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "GroupId": {
+          "Ref": "RDSSecurityGroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 5432,
+        "ToPort": 5432,
+        "SourceSecurityGroupId": {
+          "Ref": "TaskSecGroupWorker"
+        }
+      }
+    },
+    "RDSSubnetGroup": {
+      "Type": "AWS::RDS::DBSubnetGroup",
+      "Properties": {
+        "DBSubnetGroupName": {
+          "Fn::Sub": "${AWS::StackName}-pg-db-subnets"
+        },
+        "DBSubnetGroupDescription": "Subnet group for RDS Postgres",
+        "SubnetIds": {
+          "Ref": "ExistingPrivateSubnetIds"
+        }
+      }
+    },
+    "PostgresDB": {
+      "Type": "AWS::RDS::DBInstance",
+      "DeletionPolicy": "Snapshot",
+      "UpdateReplacePolicy": "Snapshot",
+      "Properties": {
+        "Engine": "postgres",
+        "EngineVersion": 16,
+        "DBInstanceClass": {
+          "Ref": "DBInstanceClass"
+        },
+        "DBInstanceIdentifier": {
+          "Fn::Sub": "${AWS::StackName}-pg-db"
+        },
+        "AllocatedStorage": {
+          "Ref": "DBAllocatedStorage"
+        },
+        "MaxAllocatedStorage": {
+          "Ref": "DBMaxAllocatedStorage"
+        },
+        "StorageType": "gp3",
+        "StorageEncrypted": true,
+        "PubliclyAccessible": false,
+        "MultiAZ": true,
+        "AutoMinorVersionUpgrade": true,
+        "BackupRetentionPeriod": 15,
+        "Port": 5432,
+        "MasterUsername": {
+          "Ref": "MasterUsername"
+        },
+        "MasterUserPassword": {
+          "Ref": "MasterUserPassword"
+        },
+        "DBName": {
+          "Ref": "DBName"
+        },
+        "VPCSecurityGroups": [
+          {
+            "Fn::GetAtt": [
+              "RDSSecurityGroup",
+              "GroupId"
+            ]
+          }
+        ],
+        "DBSubnetGroupName": {
+          "Ref": "RDSSubnetGroup"
+        },
+        "DeletionProtection": true,
+        "EnablePerformanceInsights": false,
+        "CopyTagsToSnapshot": true
+      }
+    },
+    "RDSSecrets": {
+      "DependsOn": [
+        "PostgresDB"
+      ],
+      "Type": "AWS::SecretsManager::Secret",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}/dbcredentials"
+        },
+        "Description": "Credenciales de PostgreSQL para la plataforma n8n",
+        "SecretString": {
+          "Fn::Sub": "{\n  \"user\": \"${MasterUsername}\",\n  \"password\": \"${MasterUserPassword}\",\n  \"host\": \"${PostgresDB.Endpoint.Address}\",\n  \"port\": \"5432\",\n  \"database\": \"${DBName}\"\n}  \n"
+        }
+      }
+    },
+    "CacheSubnetGroup": {
+      "Type": "AWS::ElastiCache::SubnetGroup",
+      "Properties": {
+        "Description": "Subnet group for Redis",
+        "SubnetIds": {
+          "Ref": "ExistingPrivateSubnetIds"
+        },
+        "CacheSubnetGroupName": {
+          "Fn::Sub": "${AWS::StackName}-subnets"
+        }
+      }
+    },
+    "CacheSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Allow Redis (TCP 6379) from the app SG",
+        "VpcId": {
+          "Ref": "ExistingVpcId"
+        }
+      }
+    },
+    "CacheSecGroupIngressMain": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "GroupId": {
+          "Ref": "CacheSecurityGroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 6379,
+        "ToPort": 6379,
+        "SourceSecurityGroupId": {
+          "Ref": "TaskSecGroupMain"
+        }
+      }
+    },
+    "CacheSecGroupIngressWorker": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "GroupId": {
+          "Ref": "CacheSecurityGroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 6379,
+        "ToPort": 6379,
+        "SourceSecurityGroupId": {
+          "Ref": "TaskSecGroupWorker"
+        }
+      }
+    },
+    "RedisParamGroup": {
+      "Type": "AWS::ElastiCache::ParameterGroup",
+      "Properties": {
+        "CacheParameterGroupFamily": "redis7",
+        "Description": "Minimal parameter group (defaults)"
+      }
+    },
+    "RedisPasswordSecret": {
+      "Type": "AWS::SecretsManager::Secret",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}/redispassword"
+        },
+        "Description": "Contrasena de Redis para la plataforma n8n",
+        "SecretString": {
+          "Ref": "RedisPassword"
+        }
+      }
+    },
+    "Redis": {
+      "DependsOn": [
+        "RedisParamGroup",
+        "CacheSecurityGroup",
+        "CacheSubnetGroup",
+        "RedisPasswordSecret"
+      ],
+      "Type": "AWS::ElastiCache::ReplicationGroup",
+      "Properties": {
+        "ReplicationGroupId": {
+          "Fn::Sub": "${AWS::StackName}-redis-${RedisReplicationGroupSuffix}"
+        },
+        "ReplicationGroupDescription": "Redis con Multi-AZ y failover automatico",
+        "Engine": "redis",
+        "CacheNodeType": {
+          "Ref": "RedisInstanceClass"
+        },
+        "NumNodeGroups": 1,
+        "ReplicasPerNodeGroup": 1,
+        "MultiAZEnabled": true,
+        "AutomaticFailoverEnabled": true,
+        "CacheSubnetGroupName": {
+          "Ref": "CacheSubnetGroup"
+        },
+        "SecurityGroupIds": [
+          {
+            "Ref": "CacheSecurityGroup"
+          }
+        ],
+        "CacheParameterGroupName": {
+          "Ref": "RedisParamGroup"
+        },
+        "AuthToken": {
+          "Fn::Sub": "{{resolve:secretsmanager:${RedisPasswordSecret}}}"
+        },
+        "AtRestEncryptionEnabled": true,
+        "TransitEncryptionEnabled": true,
+        "Port": 6379
+      }
+    },
+    "ECSCluster": {
+      "Type": "AWS::ECS::Cluster",
+      "DependsOn": [
+        "RDSSubnetGroup",
+        "RDSSecurityGroup",
+        "PostgresDB",
+        "S3BinaryBucket"
+      ],
+      "Properties": {
+        "ClusterName": {
+          "Fn::Sub": "${AWS::StackName}-cluster"
+        },
+        "CapacityProviders": [
+          "FARGATE",
+          "FARGATE_SPOT"
+        ]
+      }
+    },
+    "TaskSecGroupMain": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "VpcId": {
+          "Ref": "ExistingVpcId"
+        },
+        "GroupDescription": "Permite que solo el ALB llegue a las tareas main por 5678",
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 5678,
+            "ToPort": 5678,
+            "SourceSecurityGroupId": {
+              "Ref": "ALBSecGroup"
+            }
+          }
+        ],
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 5432,
+            "ToPort": 5432,
+            "DestinationSecurityGroupId": {
+              "Ref": "RDSSecurityGroup"
+            }
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 6379,
+            "ToPort": 6379,
+            "DestinationSecurityGroupId": {
+              "Ref": "CacheSecurityGroup"
+            }
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 443,
+            "ToPort": 443,
+            "CidrIp": "0.0.0.0/0"
+          },
+          {
+            "IpProtocol": "udp",
+            "FromPort": 53,
+            "ToPort": 53,
+            "CidrIp": "0.0.0.0/0"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 53,
+            "ToPort": 53,
+            "CidrIp": "0.0.0.0/0"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 80,
+            "ToPort": 80,
+            "CidrIp": "0.0.0.0/0"
+          }
+        ]
+      }
+    },
+    "TaskSecGroupWorker": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "VpcId": {
+          "Ref": "ExistingVpcId"
+        },
+        "GroupDescription": "No permite acceso del ALB a las tareas worker",
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 5432,
+            "ToPort": 5432,
+            "DestinationSecurityGroupId": {
+              "Ref": "RDSSecurityGroup"
+            }
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 6379,
+            "ToPort": 6379,
+            "DestinationSecurityGroupId": {
+              "Ref": "CacheSecurityGroup"
+            }
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 443,
+            "ToPort": 443,
+            "CidrIp": "0.0.0.0/0"
+          },
+          {
+            "IpProtocol": "udp",
+            "FromPort": 53,
+            "ToPort": 53,
+            "CidrIp": "0.0.0.0/0"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 53,
+            "ToPort": 53,
+            "CidrIp": "0.0.0.0/0"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 80,
+            "ToPort": 80,
+            "CidrIp": "0.0.0.0/0"
+          }
+        ]
+      }
+    },
+    "N8nLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/ecs/${AWS::StackName}"
+        },
+        "RetentionInDays": 90
+      }
+    },
+    "N8nTaskRole": {
+      "Type": "AWS::IAM::Role",
+      "DependsOn": [
+        "RDSSubnetGroup",
+        "RDSSecurityGroup",
+        "PostgresDB"
+      ],
+      "Properties": {
+        "RoleName": {
+          "Fn::Sub": "${AWS::StackName}-task-role"
+        },
+        "Path": "/",
+        "MaxSessionDuration": 3600,
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "inline-s3-for-task-role",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "BucketAccess",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetBucketLocation",
+                    "s3:ListBucket"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:aws:s3:::${S3BinaryBucket}"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "ObjectAccess",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:PutObject",
+                    "s3:GetObject",
+                    "s3:DeleteObject"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:aws:s3:::${S3BinaryBucket}/*"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "N8nTaskExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "DependsOn": [
+        "RDSSubnetGroup",
+        "RDSSecurityGroup",
+        "PostgresDB",
+        "RedisPasswordSecret"
+      ],
+      "Properties": {
+        "RoleName": {
+          "Fn::Sub": "${AWS::StackName}-task-execution-role"
+        },
+        "Path": "/",
+        "MaxSessionDuration": 3600,
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "secrets-access",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "secretsmanager:GetSecretValue",
+                    "secretsmanager:DescribeSecret"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${BitdefenderSecretName}*"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "kms:Decrypt"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "cloudwatch-write-logs",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Sid": "WriteToN8nLogGroup",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${AWS::StackName}"
+                    },
+                    {
+                      "Fn::Sub": "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${AWS::StackName}:*"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "ecr-pull",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:GetAuthorizationToken"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:GetDownloadUrlForLayer",
+                    "ecr:BatchGetImage"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "N8nMainTaskDefinition": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "DependsOn": [
+        "RDSSubnetGroup",
+        "RDSSecurityGroup",
+        "PostgresDB",
+        "RDSSecrets",
+        "N8nLicenseSecret",
+        "N8nEncryptionKey"
+      ],
+      "Properties": {
+        "Family": "n8n-main",
+        "Cpu": {
+          "Ref": "TaskCpu"
+        },
+        "Memory": {
+          "Ref": "TaskMemory"
+        },
+        "EphemeralStorage": {
+          "SizeInGiB": {
+            "Ref": "N8nEphemeralStorageGiB"
+          }
+        },
+        "NetworkMode": "awsvpc",
+        "RequiresCompatibilities": [
+          "FARGATE"
+        ],
+        "RuntimePlatform": {
+          "CpuArchitecture": "X86_64",
+          "OperatingSystemFamily": "LINUX"
+        },
+        "TaskRoleArn": {
+          "Fn::GetAtt": [
+            "N8nTaskRole",
+            "Arn"
+          ]
+        },
+        "ExecutionRoleArn": {
+          "Fn::GetAtt": [
+            "N8nTaskExecutionRole",
+            "Arn"
+          ]
+        },
+        "Volumes": [
+          {
+            "Name": "certs",
+            "Host": {}
+          }
+        ],
+        "ContainerDefinitions": [
+          {
+            "Name": "n8n",
+            "Image": {
+              "Ref": "N8nImageUri"
+            },
+            "Essential": true,
+            "PortMappings": [
+              {
+                "ContainerPort": 5678,
+                "HostPort": 5678,
+                "Protocol": "tcp",
+                "Name": "n8n-5678-tcp",
+                "AppProtocol": "http"
+              }
+            ],
+            "Secrets": [
+              {
+                "Name": "N8N_LICENSE_ACTIVATION_KEY",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/n8nlicense:LicenseKey::"
+                }
+              },
+              {
+                "Name": "N8N_LICENSE_TENANT_ID",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/n8nlicense:TenantId::"
+                }
+              },
+              {
+                "Name": "N8N_ENCRYPTION_KEY",
+                "ValueFrom": {
+                  "Ref": "N8nEncryptionKey"
+                }
+              },
+              {
+                "Name": "DB_POSTGRESDB_HOST",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/dbcredentials:host::"
+                }
+              },
+              {
+                "Name": "DB_POSTGRESDB_PORT",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/dbcredentials:port::"
+                }
+              },
+              {
+                "Name": "DB_POSTGRESDB_DATABASE",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/dbcredentials:database::"
+                }
+              },
+              {
+                "Name": "DB_POSTGRESDB_USER",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/dbcredentials:user::"
+                }
+              },
+              {
+                "Name": "DB_POSTGRESDB_PASSWORD",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/dbcredentials:password::"
+                }
+              },
+              {
+                "Name": "QUEUE_BULL_REDIS_PASSWORD",
+                "ValueFrom": {
+                  "Ref": "RedisPasswordSecret"
+                }
+              },
+              {
+                "Name": "SOC_BITDEFENDER_API_KEY",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${BitdefenderSecretName}:apiKey::"
+                }
+              },
+              {
+                "Name": "SOC_BITDEFENDER_COMPANY_ID",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${BitdefenderSecretName}:companyId::"
+                }
+              }
+            ],
+            "Environment": [
+              {
+                "Name": "N8N_PROXY_HOPS",
+                "Value": "1"
+              },
+              {
+                "Name": "N8N_TRUST_PROXY",
+                "Value": "true"
+              },
+              {
+                "Name": "N8N_RUNNERS_ENABLED",
+                "Value": "false"
+              },
+              {
+                "Name": "N8N_BLOCK_ENV_ACCESS_IN_NODE",
+                "Value": "false"
+              },
+              {
+                "Name": "N8N_HOST",
+                "Value": {
+                  "Ref": "N8nHostRecordName"
+                }
+              },
+              {
+                "Name": "N8N_PROTOCOL",
+                "Value": "https"
+              },
+              {
+                "Name": "N8N_DEFAULT_BINARY_DATA_MODE",
+                "Value": "filesystem"
+              },
+              {
+                "Name": "N8N_METRICS",
+                "Value": "true"
+              },
+              {
+                "Name": "N8N_METRICS_INCLUDE_QUEUE_METRICS",
+                "Value": "true"
+              },
+              {
+                "Name": "N8N_EXTERNAL_STORAGE_S3_AUTH_AUTO_DETECT",
+                "Value": "true"
+              },
+              {
+                "Name": "N8N_SECURE_COOKIE",
+                "Value": "true"
+              },
+              {
+                "Name": "DB_TYPE",
+                "Value": "postgresdb"
+              },
+              {
+                "Name": "DB_POSTGRESDB_SSL_ENABLED",
+                "Value": "true"
+              },
+              {
+                "Name": "DB_POSTGRESDB_SSL_CA_FILE",
+                "Value": "/certs/us-east-1-bundle.pem"
+              },
+              {
+                "Name": "DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED",
+                "Value": "true"
+              },
+              {
+                "Name": "N8N_EXTERNAL_STORAGE_S3_HOST",
+                "Value": {
+                  "Fn::Sub": "s3.${AWS::Region}.amazonaws.com"
+                }
+              },
+              {
+                "Name": "N8N_EXTERNAL_STORAGE_S3_BUCKET_NAME",
+                "Value": {
+                  "Ref": "S3BinaryBucket"
+                }
+              },
+              {
+                "Name": "N8N_EXTERNAL_STORAGE_S3_BUCKET_REGION",
+                "Value": {
+                  "Ref": "AWS::Region"
+                }
+              },
+              {
+                "Name": "EXECUTIONS_MODE",
+                "Value": "queue"
+              },
+              {
+                "Name": "N8N_LOG_LEVEL",
+                "Value": "info"
+              },
+              {
+                "Name": "QUEUE_HEALTH_CHECK_ACTIVE",
+                "Value": "true"
+              },
+              {
+                "Name": "QUEUE_BULL_REDIS_TLS",
+                "Value": "true"
+              },
+              {
+                "Name": "QUEUE_BULL_REDIS_HOST",
+                "Value": {
+                  "Fn::GetAtt": [
+                    "Redis",
+                    "PrimaryEndPoint.Address"
+                  ]
+                }
+              },
+              {
+                "Name": "QUEUE_BULL_REDIS_PORT",
+                "Value": {
+                  "Fn::GetAtt": [
+                    "Redis",
+                    "PrimaryEndPoint.Port"
+                  ]
+                }
+              },
+              {
+                "Name": "QUEUE_BULL_REDIS_USERNAME",
+                "Value": "default"
+              },
+              {
+                "Name": "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS",
+                "Value": "true"
+              },
+              {
+                "Name": "N8N_MULTI_MAIN_SETUP",
+                "Value": "true"
+              },
+              {
+                "Name": "EXECUTIONS_DATA_PRUNE",
+                "Value": {
+                  "Ref": "N8nExecutionsDataPrune"
+                }
+              },
+              {
+                "Name": "EXECUTIONS_DATA_MAX_AGE",
+                "Value": {
+                  "Ref": "N8nExecutionsDataMaxAgeHours"
+                }
+              },
+              {
+                "Name": "WEBHOOK_URL",
+                "Value": {
+                  "Fn::Sub": "https://${N8nHostRecordName}/"
+                }
+              },
+              {
+                "Name": "SOC_BITDEFENDER_INCIDENTS_V12_URL",
+                "Value": {
+                  "Ref": "BitdefenderIncidentsV12Url"
+                }
+              },
+              {
+                "Name": "SOC_BITDEFENDER_LICENSING_V10_URL",
+                "Value": {
+                  "Ref": "BitdefenderLicensingV10Url"
+                }
+              },
+              {
+                "Name": "SOC_BITDEFENDER_STATE_BUCKET",
+                "Value": {
+                  "Ref": "BitdefenderStateBucketName"
+                }
+              },
+              {
+                "Name": "SOC_BITDEFENDER_ADD_CHUNK_SIZE",
+                "Value": "100"
+              },
+              {
+                "Name": "SOC_BITDEFENDER_ADD_INTERVAL_SECONDS",
+                "Value": "15"
+              }
+            ],
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Fn::Sub": "/ecs/${AWS::StackName}"
+                },
+                "awslogs-region": {
+                  "Fn::Sub": "${AWS::Region}"
+                },
+                "awslogs-stream-prefix": "ecs"
+              }
+            },
+            "HealthCheck": {
+              "Command": [
+                "CMD-SHELL",
+                "curl -fsS http://127.0.0.1:5678/ || wget -qO- http://127.0.0.1:5678/ >/dev/null || exit 1"
+              ],
+              "Interval": 15,
+              "Timeout": 5,
+              "Retries": 3,
+              "StartPeriod": 90
+            },
+            "DependsOn": [
+              {
+                "ContainerName": "rds-cert-fetcher",
+                "Condition": "SUCCESS"
+              }
+            ],
+            "MountPoints": [
+              {
+                "SourceVolume": "certs",
+                "ContainerPath": "/certs"
+              }
+            ]
+          },
+          {
+            "Name": "rds-cert-fetcher",
+            "Image": "public.ecr.aws/amazonlinux/amazonlinux:2023",
+            "Essential": false,
+            "Command": [
+              "/bin/sh",
+              "-c",
+              "set -euo pipefail\nmkdir -p /certs\ncurl -fsSL https://truststore.pki.rds.amazonaws.com/us-east-1/us-east-1-bundle.pem -o /certs/us-east-1-bundle.pem\nls -l /certs\n"
+            ],
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Fn::Sub": "/ecs/${AWS::StackName}"
+                },
+                "awslogs-region": {
+                  "Fn::Sub": "${AWS::Region}"
+                },
+                "awslogs-stream-prefix": "certfetcher"
+              }
+            },
+            "MountPoints": [
+              {
+                "SourceVolume": "certs",
+                "ContainerPath": "/certs",
+                "ReadOnly": false
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "ECSMainService": {
+      "Type": "AWS::ECS::Service",
+      "DependsOn": [
+        "RDSSubnetGroup",
+        "RDSSecurityGroup",
+        "PostgresDB",
+        "Redis"
+      ],
+      "Properties": {
+        "ServiceName": {
+          "Fn::Sub": "${AWS::StackName}-svc-main"
+        },
+        "Cluster": {
+          "Fn::GetAtt": [
+            "ECSCluster",
+            "Arn"
+          ]
+        },
+        "LoadBalancers": [
+          {
+            "TargetGroupArn": {
+              "Ref": "HttpAppTargetGroup"
+            },
+            "ContainerName": "n8n",
+            "ContainerPort": 5678
+          }
+        ],
+        "DesiredCount": 2,
+        "TaskDefinition": {
+          "Ref": "N8nMainTaskDefinition"
+        },
+        "DeploymentConfiguration": {
+          "MaximumPercent": 200,
+          "MinimumHealthyPercent": 100,
+          "DeploymentCircuitBreaker": {
+            "Enable": true,
+            "Rollback": true
+          }
+        },
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "AssignPublicIp": "DISABLED",
+            "SecurityGroups": [
+              {
+                "Ref": "TaskSecGroupMain"
+              }
+            ],
+            "Subnets": {
+              "Ref": "ExistingPrivateSubnetIds"
+            }
+          }
+        },
+        "HealthCheckGracePeriodSeconds": 600,
+        "SchedulingStrategy": "REPLICA",
+        "DeploymentController": {
+          "Type": "ECS"
+        },
+        "CapacityProviderStrategy": [
+          {
+            "CapacityProvider": "FARGATE",
+            "Weight": 1,
+            "Base": 0
+          }
+        ]
+      }
+    },
+    "N8nWorkerTaskDefinition": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "DependsOn": [
+        "RDSSubnetGroup",
+        "RDSSecurityGroup",
+        "PostgresDB",
+        "N8nLicenseSecret"
+      ],
+      "Properties": {
+        "Family": "n8n-worker",
+        "Cpu": {
+          "Ref": "TaskCpu"
+        },
+        "Memory": {
+          "Ref": "TaskMemory"
+        },
+        "EphemeralStorage": {
+          "SizeInGiB": {
+            "Ref": "N8nEphemeralStorageGiB"
+          }
+        },
+        "NetworkMode": "awsvpc",
+        "RequiresCompatibilities": [
+          "FARGATE"
+        ],
+        "RuntimePlatform": {
+          "CpuArchitecture": "X86_64",
+          "OperatingSystemFamily": "LINUX"
+        },
+        "TaskRoleArn": {
+          "Fn::GetAtt": [
+            "N8nTaskRole",
+            "Arn"
+          ]
+        },
+        "ExecutionRoleArn": {
+          "Fn::GetAtt": [
+            "N8nTaskExecutionRole",
+            "Arn"
+          ]
+        },
+        "Volumes": [
+          {
+            "Name": "certs",
+            "Host": {}
+          }
+        ],
+        "ContainerDefinitions": [
+          {
+            "Name": "n8n",
+            "Image": {
+              "Ref": "N8nImageUri"
+            },
+            "Essential": true,
+            "Command": [
+              "worker"
+            ],
+            "Secrets": [
+              {
+                "Name": "N8N_LICENSE_ACTIVATION_KEY",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/n8nlicense:LicenseKey::"
+                }
+              },
+              {
+                "Name": "N8N_LICENSE_TENANT_ID",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/n8nlicense:TenantId::"
+                }
+              },
+              {
+                "Name": "N8N_ENCRYPTION_KEY",
+                "ValueFrom": {
+                  "Ref": "N8nEncryptionKey"
+                }
+              },
+              {
+                "Name": "DB_POSTGRESDB_HOST",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/dbcredentials:host::"
+                }
+              },
+              {
+                "Name": "DB_POSTGRESDB_PORT",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/dbcredentials:port::"
+                }
+              },
+              {
+                "Name": "DB_POSTGRESDB_DATABASE",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/dbcredentials:database::"
+                }
+              },
+              {
+                "Name": "DB_POSTGRESDB_USER",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/dbcredentials:user::"
+                }
+              },
+              {
+                "Name": "DB_POSTGRESDB_PASSWORD",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/dbcredentials:password::"
+                }
+              },
+              {
+                "Name": "QUEUE_BULL_REDIS_PASSWORD",
+                "ValueFrom": {
+                  "Ref": "RedisPasswordSecret"
+                }
+              },
+              {
+                "Name": "SOC_BITDEFENDER_API_KEY",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${BitdefenderSecretName}:apiKey::"
+                }
+              },
+              {
+                "Name": "SOC_BITDEFENDER_COMPANY_ID",
+                "ValueFrom": {
+                  "Fn::Sub": "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${BitdefenderSecretName}:companyId::"
+                }
+              }
+            ],
+            "Environment": [
+              {
+                "Name": "N8N_PROXY_HOPS",
+                "Value": "1"
+              },
+              {
+                "Name": "N8N_TRUST_PROXY",
+                "Value": "true"
+              },
+              {
+                "Name": "N8N_RUNNERS_ENABLED",
+                "Value": "false"
+              },
+              {
+                "Name": "N8N_BLOCK_ENV_ACCESS_IN_NODE",
+                "Value": "false"
+              },
+              {
+                "Name": "N8N_PROTOCOL",
+                "Value": "https"
+              },
+              {
+                "Name": "N8N_MODE",
+                "Value": "worker"
+              },
+              {
+                "Name": "N8N_DEFAULT_BINARY_DATA_MODE",
+                "Value": "filesystem"
+              },
+              {
+                "Name": "N8N_METRICS",
+                "Value": "true"
+              },
+              {
+                "Name": "N8N_METRICS_INCLUDE_QUEUE_METRICS",
+                "Value": "true"
+              },
+              {
+                "Name": "N8N_EXTERNAL_STORAGE_S3_AUTH_AUTO_DETECT",
+                "Value": "true"
+              },
+              {
+                "Name": "N8N_SECURE_COOKIE",
+                "Value": "true"
+              },
+              {
+                "Name": "DB_TYPE",
+                "Value": "postgresdb"
+              },
+              {
+                "Name": "DB_POSTGRESDB_SSL_ENABLED",
+                "Value": "true"
+              },
+              {
+                "Name": "DB_POSTGRESDB_SSL_CA_FILE",
+                "Value": "/certs/us-east-1-bundle.pem"
+              },
+              {
+                "Name": "DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED",
+                "Value": "true"
+              },
+              {
+                "Name": "N8N_EXTERNAL_STORAGE_S3_HOST",
+                "Value": {
+                  "Fn::Sub": "s3.${AWS::Region}.amazonaws.com"
+                }
+              },
+              {
+                "Name": "N8N_EXTERNAL_STORAGE_S3_BUCKET_NAME",
+                "Value": {
+                  "Ref": "S3BinaryBucket"
+                }
+              },
+              {
+                "Name": "N8N_EXTERNAL_STORAGE_S3_BUCKET_REGION",
+                "Value": {
+                  "Ref": "AWS::Region"
+                }
+              },
+              {
+                "Name": "EXECUTIONS_MODE",
+                "Value": "queue"
+              },
+              {
+                "Name": "N8N_LOG_LEVEL",
+                "Value": "info"
+              },
+              {
+                "Name": "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS",
+                "Value": "true"
+              },
+              {
+                "Name": "QUEUE_HEALTH_CHECK_ACTIVE",
+                "Value": "true"
+              },
+              {
+                "Name": "QUEUE_BULL_REDIS_TLS",
+                "Value": "true"
+              },
+              {
+                "Name": "QUEUE_BULL_REDIS_HOST",
+                "Value": {
+                  "Fn::GetAtt": [
+                    "Redis",
+                    "PrimaryEndPoint.Address"
+                  ]
+                }
+              },
+              {
+                "Name": "QUEUE_BULL_REDIS_PORT",
+                "Value": {
+                  "Fn::GetAtt": [
+                    "Redis",
+                    "PrimaryEndPoint.Port"
+                  ]
+                }
+              },
+              {
+                "Name": "QUEUE_BULL_REDIS_USERNAME",
+                "Value": "default"
+              },
+              {
+                "Name": "SOC_BITDEFENDER_INCIDENTS_V12_URL",
+                "Value": {
+                  "Ref": "BitdefenderIncidentsV12Url"
+                }
+              },
+              {
+                "Name": "SOC_BITDEFENDER_LICENSING_V10_URL",
+                "Value": {
+                  "Ref": "BitdefenderLicensingV10Url"
+                }
+              },
+              {
+                "Name": "SOC_BITDEFENDER_STATE_BUCKET",
+                "Value": {
+                  "Ref": "BitdefenderStateBucketName"
+                }
+              },
+              {
+                "Name": "SOC_BITDEFENDER_ADD_CHUNK_SIZE",
+                "Value": "100"
+              },
+              {
+                "Name": "SOC_BITDEFENDER_ADD_INTERVAL_SECONDS",
+                "Value": "15"
+              }
+            ],
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Fn::Sub": "/ecs/${AWS::StackName}"
+                },
+                "awslogs-region": {
+                  "Fn::Sub": "${AWS::Region}"
+                },
+                "awslogs-stream-prefix": "ecs"
+              }
+            },
+            "HealthCheck": {
+              "Command": [
+                "CMD-SHELL",
+                "echo ok"
+              ],
+              "Timeout": 15,
+              "Retries": 3,
+              "StartPeriod": 90
+            },
+            "DependsOn": [
+              {
+                "ContainerName": "rds-cert-fetcher",
+                "Condition": "SUCCESS"
+              }
+            ],
+            "MountPoints": [
+              {
+                "SourceVolume": "certs",
+                "ContainerPath": "/certs"
+              }
+            ]
+          },
+          {
+            "Name": "rds-cert-fetcher",
+            "Image": "public.ecr.aws/amazonlinux/amazonlinux:2023",
+            "Essential": false,
+            "Command": [
+              "/bin/sh",
+              "-c",
+              "set -euo pipefail\nmkdir -p /certs\ncurl -fsSL https://truststore.pki.rds.amazonaws.com/us-east-1/us-east-1-bundle.pem -o /certs/us-east-1-bundle.pem\nls -l /certs\n"
+            ],
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Fn::Sub": "/ecs/${AWS::StackName}"
+                },
+                "awslogs-region": {
+                  "Fn::Sub": "${AWS::Region}"
+                },
+                "awslogs-stream-prefix": "certfetcher"
+              }
+            },
+            "MountPoints": [
+              {
+                "SourceVolume": "certs",
+                "ContainerPath": "/certs",
+                "ReadOnly": false
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "ECSWorkerService": {
+      "Type": "AWS::ECS::Service",
+      "DependsOn": [
+        "RDSSubnetGroup",
+        "RDSSecurityGroup",
+        "PostgresDB",
+        "Redis"
+      ],
+      "Properties": {
+        "ServiceName": {
+          "Fn::Sub": "${AWS::StackName}-svc-worker"
+        },
+        "Cluster": {
+          "Fn::GetAtt": [
+            "ECSCluster",
+            "Arn"
+          ]
+        },
+        "DesiredCount": 2,
+        "TaskDefinition": {
+          "Ref": "N8nWorkerTaskDefinition"
+        },
+        "DeploymentConfiguration": {
+          "MaximumPercent": 200,
+          "MinimumHealthyPercent": 100,
+          "DeploymentCircuitBreaker": {
+            "Enable": true,
+            "Rollback": true
+          }
+        },
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "AssignPublicIp": "DISABLED",
+            "SecurityGroups": [
+              {
+                "Ref": "TaskSecGroupWorker"
+              }
+            ],
+            "Subnets": {
+              "Ref": "ExistingPrivateSubnetIds"
+            }
+          }
+        },
+        "HealthCheckGracePeriodSeconds": 600,
+        "SchedulingStrategy": "REPLICA",
+        "DeploymentController": {
+          "Type": "ECS"
+        },
+        "CapacityProviderStrategy": [
+          {
+            "CapacityProvider": "FARGATE",
+            "Weight": 1,
+            "Base": 0
+          }
+        ]
+      }
+    },
+    "ECSMainServiceScalableTarget": {
+      "Type": "AWS::ApplicationAutoScaling::ScalableTarget",
+      "DependsOn": "ECSMainService",
+      "Properties": {
+        "ServiceNamespace": "ecs",
+        "ScalableDimension": "ecs:service:DesiredCount",
+        "ResourceId": {
+          "Fn::Sub": [
+            "service/${ClusterName}/${ServiceName}",
+            {
+              "ClusterName": {
+                "Ref": "ECSCluster"
+              },
+              "ServiceName": {
+                "Fn::GetAtt": [
+                  "ECSMainService",
+                  "Name"
+                ]
+              }
+            }
+          ]
+        },
+        "MinCapacity": 2,
+        "MaxCapacity": 4,
+        "RoleARN": {
+          "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+        }
+      }
+    },
+    "ECSMainServiceCPUScalingPolicy": {
+      "Type": "AWS::ApplicationAutoScaling::ScalingPolicy",
+      "Properties": {
+        "PolicyName": {
+          "Fn::Sub": "${AWS::StackName}-main-cpu-tt"
+        },
+        "PolicyType": "TargetTrackingScaling",
+        "ScalingTargetId": {
+          "Ref": "ECSMainServiceScalableTarget"
+        },
+        "TargetTrackingScalingPolicyConfiguration": {
+          "PredefinedMetricSpecification": {
+            "PredefinedMetricType": "ECSServiceAverageCPUUtilization"
+          },
+          "TargetValue": 60,
+          "ScaleInCooldown": 60,
+          "ScaleOutCooldown": 60
+        }
+      }
+    },
+    "ECSMainServiceMemoryScalingPolicy": {
+      "Type": "AWS::ApplicationAutoScaling::ScalingPolicy",
+      "Properties": {
+        "PolicyName": {
+          "Fn::Sub": "${AWS::StackName}-main-mem-tt"
+        },
+        "PolicyType": "TargetTrackingScaling",
+        "ScalingTargetId": {
+          "Ref": "ECSMainServiceScalableTarget"
+        },
+        "TargetTrackingScalingPolicyConfiguration": {
+          "PredefinedMetricSpecification": {
+            "PredefinedMetricType": "ECSServiceAverageMemoryUtilization"
+          },
+          "TargetValue": 70,
+          "ScaleInCooldown": 60,
+          "ScaleOutCooldown": 60
+        }
+      }
+    },
+    "ECSServiceScalableTarget": {
+      "Type": "AWS::ApplicationAutoScaling::ScalableTarget",
+      "DependsOn": "ECSWorkerService",
+      "Properties": {
+        "ServiceNamespace": "ecs",
+        "ScalableDimension": "ecs:service:DesiredCount",
+        "ResourceId": {
+          "Fn::Sub": [
+            "service/${ClusterName}/${ServiceName}",
+            {
+              "ClusterName": {
+                "Ref": "ECSCluster"
+              },
+              "ServiceName": {
+                "Fn::GetAtt": [
+                  "ECSWorkerService",
+                  "Name"
+                ]
+              }
+            }
+          ]
+        },
+        "MinCapacity": 2,
+        "MaxCapacity": 4,
+        "RoleARN": {
+          "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+        }
+      }
+    },
+    "ECSServiceCPUScalingPolicy": {
+      "Type": "AWS::ApplicationAutoScaling::ScalingPolicy",
+      "Properties": {
+        "PolicyName": {
+          "Fn::Sub": "${AWS::StackName}-cpu-tt"
+        },
+        "PolicyType": "TargetTrackingScaling",
+        "ScalingTargetId": {
+          "Ref": "ECSServiceScalableTarget"
+        },
+        "TargetTrackingScalingPolicyConfiguration": {
+          "PredefinedMetricSpecification": {
+            "PredefinedMetricType": "ECSServiceAverageCPUUtilization"
+          },
+          "TargetValue": 60,
+          "ScaleInCooldown": 60,
+          "ScaleOutCooldown": 60
+        }
+      }
+    },
+    "ECSServiceMemoryScalingPolicy": {
+      "Type": "AWS::ApplicationAutoScaling::ScalingPolicy",
+      "Properties": {
+        "PolicyName": {
+          "Fn::Sub": "${AWS::StackName}-mem-tt"
+        },
+        "PolicyType": "TargetTrackingScaling",
+        "ScalingTargetId": {
+          "Ref": "ECSServiceScalableTarget"
+        },
+        "TargetTrackingScalingPolicyConfiguration": {
+          "PredefinedMetricSpecification": {
+            "PredefinedMetricType": "ECSServiceAverageMemoryUtilization"
+          },
+          "TargetValue": 70,
+          "ScaleInCooldown": 60,
+          "ScaleOutCooldown": 60
+        }
+      }
+    },
+    "HashfwCloudFront": {
+      "Type": "AWS::CloudFront::Distribution",
+      "Condition": "CreateHashfwCloudFront",
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "DistributionConfig": {
+          "Comment": {
+            "Fn::Sub": "${HashfwDomainName} - blocklist hashfw"
+          },
+          "Enabled": true,
+          "HttpVersion": "http2",
+          "PriceClass": "PriceClass_100",
+          "Aliases": [
+            {
+              "Ref": "HashfwDomainName"
+            }
+          ],
+          "Origins": [
+            {
+              "Id": {
+                "Fn::Sub": "s3-${HashfwOriginBucketName}"
+              },
+              "DomainName": {
+                "Fn::Sub": "${HashfwOriginBucketName}.s3.${AWS::Region}.amazonaws.com"
+              },
+              "OriginAccessControlId": {
+                "Ref": "IocOAC"
+              },
+              "S3OriginConfig": {
+                "OriginAccessIdentity": ""
+              }
+            }
+          ],
+          "DefaultCacheBehavior": {
+            "TargetOriginId": {
+              "Fn::Sub": "s3-${HashfwOriginBucketName}"
+            },
+            "ViewerProtocolPolicy": "redirect-to-https",
+            "AllowedMethods": [
+              "HEAD",
+              "GET"
+            ],
+            "CachedMethods": [
+              "HEAD",
+              "GET"
+            ],
+            "Compress": true,
+            "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+          },
+          "ViewerCertificate": {
+            "AcmCertificateArn": {
+              "Ref": "HashfwCertArn"
+            },
+            "SslSupportMethod": "sni-only",
+            "MinimumProtocolVersion": "TLSv1.2_2021"
+          },
+          "Restrictions": {
+            "GeoRestriction": {
+              "RestrictionType": "none",
+              "Locations": []
+            }
+          },
+          "WebACLId": {
+            "Ref": "HashfwWAFArn"
+          }
+        },
+        "Tags": [
+          {
+            "Key": "Proyecto",
+            "Value": "n8n"
+          }
+        ]
+      }
+    },
+    "HashfwWAFLoggingConfig": {
+      "Type": "AWS::WAFv2::LoggingConfiguration",
+      "Properties": {
+        "ResourceArn": {
+          "Ref": "HashfwWAFArn"
+        },
+        "LogDestinationConfigs": [
+          {
+            "Fn::Sub": "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:aws-waf-logs-global"
+          }
+        ]
+      }
+    },
+    "ObservabilidadWAFLoggingConfig": {
+      "Type": "AWS::WAFv2::LoggingConfiguration",
+      "Properties": {
+        "ResourceArn": {
+          "Ref": "ObservabilidadWAFArn"
+        },
+        "LogDestinationConfigs": [
+          {
+            "Fn::Sub": "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:aws-waf-logs-global"
+          }
+        ]
+      }
+    },
+    "SecretsManagerEndpointIngressMain": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "GroupId": {
+          "Ref": "SecretsManagerEndpointSGId"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 443,
+        "ToPort": 443,
+        "SourceSecurityGroupId": {
+          "Ref": "TaskSecGroupMain"
+        },
+        "Description": "Permite que las tasks n8n-main accedan al VPC endpoint de Secrets Manager"
+      }
+    },
+    "SecretsManagerEndpointIngressWorker": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "GroupId": {
+          "Ref": "SecretsManagerEndpointSGId"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 443,
+        "ToPort": 443,
+        "SourceSecurityGroupId": {
+          "Ref": "TaskSecGroupWorker"
+        },
+        "Description": "Permite que las tasks n8n-worker accedan al VPC endpoint de Secrets Manager"
+      }
+    },
+    "IocCloudFront": {
+      "Type": "AWS::CloudFront::Distribution",
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "DistributionConfig": {
+          "Comment": {
+            "Fn::Sub": "${IocDomainName} - alias HTTPS para hash_sha256.txt"
+          },
+          "Enabled": true,
+          "HttpVersion": "http2",
+          "PriceClass": "PriceClass_100",
+          "Aliases": [
+            {
+              "Ref": "IocDomainName"
+            }
+          ],
+          "Origins": [
+            {
+              "Id": {
+                "Fn::Sub": "s3-${BitdefenderStateBucketName}"
+              },
+              "DomainName": {
+                "Fn::Sub": "${BitdefenderStateBucketName}.s3.${AWS::Region}.amazonaws.com"
+              },
+              "OriginAccessControlId": {
+                "Ref": "IocOAC"
+              },
+              "S3OriginConfig": {
+                "OriginAccessIdentity": ""
+              }
+            }
+          ],
+          "DefaultCacheBehavior": {
+            "TargetOriginId": {
+              "Fn::Sub": "s3-${BitdefenderStateBucketName}"
+            },
+            "ViewerProtocolPolicy": "redirect-to-https",
+            "AllowedMethods": [
+              "HEAD",
+              "GET"
+            ],
+            "CachedMethods": [
+              "HEAD",
+              "GET"
+            ],
+            "Compress": true,
+            "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+          },
+          "ViewerCertificate": {
+            "AcmCertificateArn": {
+              "Ref": "IocCertArn"
+            },
+            "SslSupportMethod": "sni-only",
+            "MinimumProtocolVersion": "TLSv1.2_2021"
+          },
+          "Restrictions": {
+            "GeoRestriction": {
+              "RestrictionType": "none",
+              "Locations": []
+            }
+          }
+        },
+        "Tags": [
+          {
+            "Key": "Proyecto",
+            "Value": "n8n"
+          }
+        ]
+      }
+    },
+    "RawMailBucket": {
+      "Type": "AWS::S3::Bucket",
+      "DependsOn": [
+        "MailNormalizerLambdaS3InvokePermission"
+      ],
+      "Properties": {
+        "BucketName": {
+          "Ref": "RawBucketName"
+        },
+        "VersioningConfiguration": {
+          "Status": "Enabled"
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
+          ]
+        },
+        "NotificationConfiguration": {
+          "LambdaConfigurations": [
+            {
+              "Event": "s3:ObjectCreated:*",
+              "Function": {
+                "Fn::GetAtt": [
+                  "MailNormalizerLambda",
+                  "Arn"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "NormalizedMailBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "BucketName": {
+          "Ref": "NormalizedBucketName"
+        },
+        "VersioningConfiguration": {
+          "Status": "Enabled"
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "MailGuardLambdaRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": {
+          "Fn::Sub": "${AWS::StackName}-mail-guard-role"
+        },
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        ]
+      }
+    },
+    "MailNormalizerLambdaRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": {
+          "Fn::Sub": "${AWS::StackName}-mail-normalizer-role"
+        },
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+        ],
+        "Policies": [
+          {
+            "PolicyName": "MailNormalizerS3Access",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "ReadRawMail",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:ListBucket"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:aws:s3:::${RawBucketName}"
+                    },
+                    {
+                      "Fn::Sub": "arn:aws:s3:::${RawBucketName}/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "ReadWriteNormalized",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:PutObject",
+                    "s3:ListBucket"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:aws:s3:::${NormalizedBucketName}"
+                    },
+                    {
+                      "Fn::Sub": "arn:aws:s3:::${NormalizedBucketName}/*"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "MailGuardLambda": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-mail-guard"
+        },
+        "Runtime": "python3.12",
+        "Handler": "lambda_function.handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "MailGuardLambdaRole",
+            "Arn"
+          ]
+        },
+        "Timeout": 10,
+        "MemorySize": 128,
+        "Environment": {
+          "Variables": {
+            "ALLOWED_RECIPIENT": {
+              "Ref": "IngestEmailAddress"
+            },
+            "ALLOWED_SENDER_DOMAINS": {
+              "Ref": "AllowedSenderDomains"
+            }
+          }
+        },
+        "Code": {
+          "ZipFile": "import json\nimport logging\nimport os\nfrom email.utils import parseaddr\n\n\nlogger = logging.getLogger()\nlogger.setLevel(logging.INFO)\n\nALLOWED_RECIPIENT = os.environ.get(\n    \"ALLOWED_RECIPIENT\",\n    \"\",\n).strip().lower()\n\nALLOWED_DOMAINS = {\n    value.strip().lower()\n    for value in os.environ.get(\n        \"ALLOWED_SENDER_DOMAINS\",\n        \"\",\n    ).split(\",\")\n    if value.strip()\n}\n\nPASS_STATUSES = {\"PASS\"}\nNON_FAIL_STATUSES = {\"PASS\", \"GRAY\", \"PROCESSING_FAILED\", \"NONE\", \"PENDING\"}\n\n\ndef response(disposition: str, reason: str) -> dict:\n    logger.info(json.dumps({\"disposition\": disposition, \"reason\": reason}))\n    return {\"disposition\": disposition}\n\n\ndef parse_domain(value: str) -> str:\n    address = parseaddr(value or \"\")[1] or (value or \"\")\n    if \"@\" not in address:\n        return \"\"\n    return address.rsplit(\"@\", 1)[1].strip().lower()\n\n\ndef domain_allowed(domain: str) -> bool:\n    return any(domain == allowed or domain.endswith(f\".{allowed}\") for allowed in ALLOWED_DOMAINS)\n\n\ndef handler(event, context):\n    try:\n        records = event.get(\"Records\", [])\n        if not records:\n            return response(\"STOP_RULE_SET\", \"Event without SES records\")\n\n        for record in records:\n            ses = record.get(\"ses\", {})\n            mail = ses.get(\"mail\", {})\n            receipt = ses.get(\"receipt\", {})\n\n            recipients = [str(x).strip().lower() for x in (receipt.get(\"recipients\") or mail.get(\"destination\") or []) if str(x).strip()]\n            if ALLOWED_RECIPIENT not in recipients:\n                return response(\"STOP_RULE_SET\", f\"Recipient not allowed: {recipients}\")\n\n            source = str(mail.get(\"source\", \"\")).strip()\n            common_headers = mail.get(\"commonHeaders\", {})\n            from_headers = common_headers.get(\"from\") or []\n            candidate_sender = source or (from_headers[0] if from_headers else \"\")\n            sender_domain = parse_domain(candidate_sender)\n\n            if not sender_domain or not domain_allowed(sender_domain):\n                return response(\"STOP_RULE_SET\", f\"Sender domain not allowed: {sender_domain or 'unknown'}\")\n\n            spam_status = str((receipt.get(\"spamVerdict\") or {}).get(\"status\", \"\")).upper()\n            virus_status = str((receipt.get(\"virusVerdict\") or {}).get(\"status\", \"\")).upper()\n            spf_status = str((receipt.get(\"spfVerdict\") or {}).get(\"status\", \"\")).upper()\n            dkim_status = str((receipt.get(\"dkimVerdict\") or {}).get(\"status\", \"\")).upper()\n\n            if spam_status not in PASS_STATUSES:\n                return response(\"STOP_RULE_SET\", f\"Spam verdict rejected: {spam_status}\")\n\n            if virus_status not in PASS_STATUSES:\n                return response(\"STOP_RULE_SET\", f\"Virus verdict rejected: {virus_status}\")\n\n            if spf_status and spf_status not in NON_FAIL_STATUSES:\n                return response(\"STOP_RULE_SET\", f\"SPF verdict rejected: {spf_status}\")\n\n            if dkim_status and dkim_status not in NON_FAIL_STATUSES:\n                return response(\"STOP_RULE_SET\", f\"DKIM verdict rejected: {dkim_status}\")\n\n        return response(\"CONTINUE\", \"Message accepted\")\n    except Exception as exc:\n        logger.exception(\"Unhandled error while validating SES inbound mail\")\n        return response(\"STOP_RULE_SET\", f\"Unhandled exception: {exc}\")\n"
+        }
+      }
+    },
+    "MailGuardLambdaSESPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "MailGuardLambda",
+            "Arn"
+          ]
+        },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "ses.amazonaws.com",
+        "SourceAccount": {
+          "Ref": "AWS::AccountId"
+        }
+      }
+    },
+    "MailNormalizerLambda": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-mail-normalizer"
+        },
+        "Runtime": "python3.12",
+        "Handler": "lambda_function.handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "MailNormalizerLambdaRole",
+            "Arn"
+          ]
+        },
+        "Timeout": 60,
+        "MemorySize": 256,
+        "VpcConfig": {
+          "Fn::If": [
+            "UseVpcConfig",
+            {
+              "SubnetIds": {
+                "Ref": "VpcSubnetIds"
+              },
+              "SecurityGroupIds": [
+                {
+                  "Ref": "LambdaSecurityGroupId"
+                }
+              ]
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
+          ]
+        },
+        "Environment": {
+          "Variables": {
+            "NORM_BUCKET": {
+              "Ref": "NormalizedBucketName"
+            },
+            "NORM_PREFIX": "normalized/",
+            "WEBHOOK_URL": {
+              "Ref": "WebhookUrl"
+            },
+            "WEBHOOK_TIMEOUT_SECONDS": {
+              "Ref": "WebhookTimeoutSeconds"
+            },
+            "WEBHOOK_REQUIRED": {
+              "Ref": "WebhookRequired"
+            },
+            "DISPATCH_PREFIX": {
+              "Ref": "DispatchPrefix"
+            },
+            "WEBHOOK_BASIC_USER": {
+              "Ref": "WebhookBasicUser"
+            },
+            "WEBHOOK_BASIC_PASSWORD": {
+              "Ref": "WebhookBasicPassword"
+            }
+          }
+        },
+        "Code": {
+          "ZipFile": "import base64\nimport hashlib\nimport html\nimport json\nimport logging\nimport os\nimport re\nimport urllib.error\nimport urllib.request\nfrom email import policy\nfrom email.parser import BytesParser\n\nimport boto3\nfrom botocore.exceptions import ClientError\n\n\nlogger = logging.getLogger()\nlogger.setLevel(logging.INFO)\n\ns3 = boto3.client(\"s3\")\n\nNORM_BUCKET = os.environ[\"NORM_BUCKET\"]\nNORM_PREFIX = os.environ[\"NORM_PREFIX\"]\nWEBHOOK_URL = os.environ.get(\"WEBHOOK_URL\", \"\").strip()\nWEBHOOK_TIMEOUT_SECONDS = int(os.environ.get(\"WEBHOOK_TIMEOUT_SECONDS\", \"10\"))\nWEBHOOK_REQUIRED = os.environ.get(\"WEBHOOK_REQUIRED\", \"false\").strip().lower() == \"true\"\nDISPATCH_PREFIX = os.environ.get(\"DISPATCH_PREFIX\", \"normalized/dispatched/\")\nWEBHOOK_TOKEN = os.environ.get(\"WEBHOOK_TOKEN\", \"\").strip()\nWEBHOOK_TOKEN_HEADER = os.environ.get(\"WEBHOOK_TOKEN_HEADER\", \"X-Webhook-Token\").strip() or \"X-Webhook-Token\"\nWEBHOOK_BASIC_USER = os.environ.get(\"WEBHOOK_BASIC_USER\", \"\").strip()\nWEBHOOK_BASIC_PASSWORD = os.environ.get(\"WEBHOOK_BASIC_PASSWORD\", \"\").strip()\n\nURL_RE = re.compile(r'https?://[^\\s<>\"\\']+', re.IGNORECASE)\nIP_RE = re.compile(r'\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b')\nSHA256_RE = re.compile(r'\\b[a-fA-F0-9]{64}\\b')\nDOMAIN_RE = re.compile(r'\\b(?=.{1,253}\\b)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\\.)+[A-Za-z]{2,63}\\b')\n\n\ndef strip_html(text: str) -> str:\n    text = re.sub(r'(?is)<script.*?>.*?</script>', ' ', text)\n    text = re.sub(r'(?is)<style.*?>.*?</style>', ' ', text)\n    text = re.sub(r'(?is)<br\\s*/?>', '\\n', text)\n    text = re.sub(r'(?is)</p\\s*>', '\\n', text)\n    text = re.sub(r'(?is)<.*?>', ' ', text)\n    text = html.unescape(text)\n    text = re.sub(r'[ \\t]+', ' ', text)\n    text = re.sub(r'\\n{3,}', '\\n\\n', text)\n    return text.strip()\n\n\ndef sanitize_text(text: str) -> str:\n    text = text.replace('\\x00', ' ')\n    text = re.sub(r'[ \\t]+', ' ', text)\n    text = re.sub(r'\\n{3,}', '\\n\\n', text)\n    return text.strip()\n\n\ndef parse_email(raw_bytes: bytes):\n    msg = BytesParser(policy=policy.default).parsebytes(raw_bytes)\n\n    text_parts = []\n    html_parts = []\n    attachments = []\n\n    if msg.is_multipart():\n        for part in msg.walk():\n            content_disposition = (part.get_content_disposition() or \"\").lower()\n            content_type = (part.get_content_type() or \"\").lower()\n\n            if content_disposition == \"attachment\":\n                attachments.append({\n                    \"filename\": part.get_filename(),\n                    \"content_type\": content_type,\n                    \"size_bytes\": len(part.get_payload(decode=True) or b\"\"),\n                })\n                continue\n\n            try:\n                payload = part.get_content()\n            except Exception:\n                payload = None\n\n            if not payload:\n                continue\n\n            if content_type == \"text/plain\":\n                text_parts.append(str(payload))\n            elif content_type == \"text/html\":\n                html_parts.append(str(payload))\n    else:\n        payload = msg.get_content()\n        ctype = (msg.get_content_type() or \"\").lower()\n        if ctype == \"text/html\":\n            html_parts.append(str(payload))\n        else:\n            text_parts.append(str(payload))\n\n    plain = \"\\n\\n\".join([sanitize_text(t) for t in text_parts if t and str(t).strip()])\n    html_text = \"\\n\\n\".join([strip_html(h) for h in html_parts if h and str(h).strip()])\n\n    best_body = plain if plain else html_text\n    merged_text = \"\\n\\n\".join([x for x in [plain, html_text] if x]).strip()\n\n    return {\n        \"subject\": str(msg.get(\"subject\", \"\")),\n        \"from\": str(msg.get(\"from\", \"\")),\n        \"to\": str(msg.get(\"to\", \"\")),\n        \"cc\": str(msg.get(\"cc\", \"\")),\n        \"date\": str(msg.get(\"date\", \"\")),\n        \"message_id\": str(msg.get(\"message-id\", \"\")),\n        \"reply_to\": str(msg.get(\"reply-to\", \"\")),\n        \"body_text_best_effort\": best_body,\n        \"body_text_merged\": merged_text,\n        \"attachments\": attachments,\n    }\n\n\ndef unique_sorted(values):\n    return sorted(list(set([v.strip().lower() for v in values if v and str(v).strip()])))\n\n\ndef prelim_iocs(text: str):\n    urls = unique_sorted(URL_RE.findall(text or \"\"))\n    ips = unique_sorted(IP_RE.findall(text or \"\"))\n    sha256 = unique_sorted(SHA256_RE.findall(text or \"\"))\n    domains = unique_sorted([d for d in DOMAIN_RE.findall(text or \"\") if not d.lower().startswith(\"amazonaws.com\")])\n    return {\n        \"ips\": ips,\n        \"domains\": domains,\n        \"urls\": urls,\n        \"sha256\": sha256,\n    }\n\n\ndef object_exists(bucket: str, key: str) -> bool:\n    try:\n        s3.head_object(Bucket=bucket, Key=key)\n        return True\n    except ClientError as exc:\n        if exc.response.get(\"Error\", {}).get(\"Code\") in {\"404\", \"NoSuchKey\", \"NotFound\"}:\n            return False\n        raise\n\n\ndef build_webhook_headers() -> dict:\n    headers = {\"Content-Type\": \"application/json\"}\n\n    if WEBHOOK_TOKEN:\n        headers[WEBHOOK_TOKEN_HEADER] = WEBHOOK_TOKEN\n\n    if WEBHOOK_BASIC_USER or WEBHOOK_BASIC_PASSWORD:\n        raw = f\"{WEBHOOK_BASIC_USER}:{WEBHOOK_BASIC_PASSWORD}\".encode(\"utf-8\")\n        headers[\"Authorization\"] = f\"Basic {base64.b64encode(raw).decode('ascii')}\"\n\n    return headers\n\n\ndef dispatch_to_n8n(doc: dict, normalized_key: str, dispatch_key: str):\n    if not WEBHOOK_URL:\n        logger.info(\"Skipping n8n webhook because WEBHOOK_URL is not configured\")\n        return\n\n    if object_exists(NORM_BUCKET, dispatch_key):\n        logger.info(\"Dispatch marker already exists, skipping webhook for %s\", normalized_key)\n        return\n\n    payload = {\n        \"email\": doc[\"email\"],\n        \"normalized_key\": normalized_key,\n        \"source\": \"ses\",\n        \"raw_bucket\": doc[\"source\"][\"bucket\"],\n        \"raw_key\": doc[\"source\"][\"key\"],\n    }\n\n    request = urllib.request.Request(\n        WEBHOOK_URL,\n        data=json.dumps(payload).encode(\"utf-8\"),\n        headers=build_webhook_headers(),\n        method=\"POST\",\n    )\n\n    try:\n        with urllib.request.urlopen(request, timeout=WEBHOOK_TIMEOUT_SECONDS) as response:\n            status = getattr(response, \"status\", response.getcode())\n            body = response.read().decode(\"utf-8\", errors=\"replace\")\n\n        if 200 <= status < 300:\n            s3.put_object(\n                Bucket=NORM_BUCKET,\n                Key=dispatch_key,\n                Body=json.dumps({\"normalized_key\": normalized_key, \"status\": status}).encode(\"utf-8\"),\n                ContentType=\"application/json\",\n            )\n            logger.info(\"Dispatched normalized mail to n8n with status %s\", status)\n            return\n\n        message = f\"n8n webhook returned status {status}: {body}\"\n        if WEBHOOK_REQUIRED:\n            raise RuntimeError(message)\n        logger.warning(message)\n    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, RuntimeError) as exc:\n        if WEBHOOK_REQUIRED:\n            raise\n        logger.warning(\"Best-effort webhook dispatch failed for %s: %s\", normalized_key, exc)\n\n\ndef handler(event, context):\n    for record in event.get(\"Records\", []):\n        src_bucket = record[\"s3\"][\"bucket\"][\"name\"]\n        src_key = record[\"s3\"][\"object\"][\"key\"]\n\n        if not src_key.startswith(\"raw/inbox/\"):\n            continue\n\n        obj = s3.get_object(Bucket=src_bucket, Key=src_key)\n        raw_bytes = obj[\"Body\"].read()\n\n        parsed = parse_email(raw_bytes)\n        iocs = prelim_iocs(parsed.get(\"body_text_merged\", \"\"))\n\n        digest = hashlib.sha256(f\"{src_bucket}:{src_key}\".encode()).hexdigest()\n        out_key = f\"{NORM_PREFIX}{digest}.json\"\n        dispatch_key = f\"{DISPATCH_PREFIX}{digest}.json\"\n\n        doc = {\n            \"source\": {\n                \"bucket\": src_bucket,\n                \"key\": src_key,\n                \"etag\": record[\"s3\"][\"object\"].get(\"eTag\"),\n            },\n            \"email\": parsed,\n            \"prelim_iocs\": iocs,\n            \"pipeline\": {\n                \"normalizer\": os.environ.get(\"AWS_LAMBDA_FUNCTION_NAME\"),\n            },\n        }\n\n        s3.put_object(\n            Bucket=NORM_BUCKET,\n            Key=out_key,\n            Body=json.dumps(doc, ensure_ascii=False, indent=2).encode(\"utf-8\"),\n            ContentType=\"application/json\",\n        )\n\n        dispatch_to_n8n(doc, out_key, dispatch_key)\n\n    return {\"ok\": True}\n"
+        }
+      }
+    },
+    "MailNormalizerLambdaS3InvokePermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "MailNormalizerLambda",
+            "Arn"
+          ]
+        },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "s3.amazonaws.com",
+        "SourceAccount": {
+          "Ref": "AWS::AccountId"
+        },
+        "SourceArn": {
+          "Fn::Sub": "arn:aws:s3:::${RawBucketName}"
+        }
+      }
+    },
+    "SesReceiptRuleSet": {
+      "Type": "AWS::SES::ReceiptRuleSet",
+      "Condition": "UseNewRuleSet",
+      "Properties": {
+        "RuleSetName": {
+          "Fn::Sub": "${AWS::StackName}-ruleset"
+        }
+      }
+    },
+    "SesReceiptRule": {
+      "Type": "AWS::SES::ReceiptRule",
+      "DependsOn": [
+        "MailGuardLambdaSESPermission"
+      ],
+      "Properties": {
+        "RuleSetName": {
+          "Fn::If": [
+            "UseNewRuleSet",
+            {
+              "Ref": "SesReceiptRuleSet"
+            },
+            {
+              "Ref": "ExistingReceiptRuleSet"
+            }
+          ]
+        },
+        "Rule": {
+          "Name": {
+            "Fn::Sub": "${AWS::StackName}-guard-and-store"
+          },
+          "Enabled": true,
+          "ScanEnabled": true,
+          "TlsPolicy": "Require",
+          "Recipients": [
+            {
+              "Ref": "IngestEmailAddress"
+            }
+          ],
+          "Actions": [
+            {
+              "LambdaAction": {
+                "FunctionArn": {
+                  "Fn::GetAtt": [
+                    "MailGuardLambda",
+                    "Arn"
+                  ]
+                },
+                "InvocationType": "RequestResponse"
+              }
+            },
+            {
+              "S3Action": {
+                "BucketName": {
+                  "Ref": "RawBucketName"
+                },
+                "ObjectKeyPrefix": "raw/inbox/"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "SocMailSendQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-soc-mail-queue"
+        },
+        "VisibilityTimeout": 300,
+        "MessageRetentionPeriod": 86400,
+        "KmsMasterKeyId": "alias/aws/sqs"
+      }
+    },
+    "SocMailSenderLambdaRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": {
+          "Fn::Sub": "${AWS::StackName}-soc-mail-sender-role"
+        },
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        ],
+        "Policies": [
+          {
+            "PolicyName": "SocMailSenderInline",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "ReadSqs",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:GetQueueAttributes"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "SocMailSendQueue",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "SendEmailViaSes",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ses:SendEmail",
+                    "ses:SendRawEmail"
+                  ],
+                  "Resource": {
+                    "Ref": "SesIdentityArn"
+                  }
+                },
+                {
+                  "Sid": "ReadMailTemplate",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:s3:::${MailTemplateBucketName}/${MailTemplateKey}"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "SocMailSenderLambda": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-soc-mail-sender"
+        },
+        "Runtime": "python3.12",
+        "Handler": "index.handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "SocMailSenderLambdaRole",
+            "Arn"
+          ]
+        },
+        "Timeout": 60,
+        "MemorySize": 256,
+        "Environment": {
+          "Variables": {
+            "SES_FROM_ADDRESS": {
+              "Ref": "SesFromAddress"
+            },
+            "NOTIFICATION_TO": {
+              "Ref": "NotificationToAddresses"
+            },
+            "NOTIFICATION_CC": {
+              "Ref": "NotificationCcAddresses"
+            },
+            "MUNICIPALITY_NAME": {
+              "Ref": "MunicipalityName"
+            },
+            "MUNICIPALITY_LOGO_URL": {
+              "Ref": "MunicipalityLogoUrl"
+            },
+            "MUNICIPALITY_URL": {
+              "Ref": "MunicipalityUrl"
+            },
+            "MAIL_TEMPLATE_BUCKET": {
+              "Ref": "MailTemplateBucketName"
+            },
+            "MAIL_TEMPLATE_KEY": {
+              "Ref": "MailTemplateKey"
+            }
+          }
+        },
+        "Code": {
+          "ZipFile": "import json\nimport os\nimport re\nimport boto3\n\nses = boto3.client(\"ses\")\ns3 = boto3.client(\"s3\")\n\nFROM_ADDRESS = os.environ[\"SES_FROM_ADDRESS\"]\nTO_ADDRESSES = [x.strip() for x in os.environ.get(\"NOTIFICATION_TO\", \"\").split(\",\") if x.strip()]\nCC_ADDRESSES = [x.strip() for x in os.environ.get(\"NOTIFICATION_CC\", \"\").split(\",\") if x.strip()]\nMUNICIPALITY_NAME = os.environ.get(\"MUNICIPALITY_NAME\", \"\")\nMUNICIPALITY_LOGO_URL = os.environ.get(\"MUNICIPALITY_LOGO_URL\", \"\")\nMUNICIPALITY_URL = os.environ.get(\"MUNICIPALITY_URL\", \"\")\nTEMPLATE_BUCKET = os.environ.get(\"MAIL_TEMPLATE_BUCKET\", \"\")\nTEMPLATE_KEY = os.environ.get(\"MAIL_TEMPLATE_KEY\", \"templates/soc_ioc_notification_v1.html\")\n\n_template_cache = None\n\ndef get_template():\n    global _template_cache\n    if _template_cache is None and TEMPLATE_BUCKET:\n        obj = s3.get_object(Bucket=TEMPLATE_BUCKET, Key=TEMPLATE_KEY)\n        _template_cache = obj[\"Body\"].read().decode(\"utf-8\")\n    return _template_cache or \"\"\n\ndef render(template, data):\n    def replacer(m):\n        key = m.group(1).strip()\n        parts = key.split(\"|\")\n        var = parts[0].strip()\n        val = data.get(var, \"\")\n        for filt in parts[1:]:\n            filt = filt.strip()\n            if filt.startswith(\"default(\"):\n                if not val:\n                    val = filt[8:-1].strip(\"'\\\"\")\n            elif filt.startswith(\"replace(\"):\n                args = filt[8:-1].split(\",\")\n                if len(args) == 2:\n                    val = val.replace(args[0].strip(\"'\\\" \"), args[1].strip(\"'\\\" \"))\n        return str(val)\n    return re.sub(r\"\\{\\{\\s*(.*?)\\s*\\}\\}\", replacer, template)\n\ndef handler(event, context):\n    for record in event.get(\"Records\", []):\n        body = json.loads(record[\"body\"])\n        subject = body.get(\"subject\", \"Notificacion SOC\")\n        text = body.get(\"text\", \"\")\n        to = body.get(\"to\") or TO_ADDRESSES\n        cc = body.get(\"cc\") or CC_ADDRESSES\n        td = body.get(\"template_data\", {})\n        td.setdefault(\"municipality_name\", MUNICIPALITY_NAME)\n        td.setdefault(\"municipality_logo_url\", MUNICIPALITY_LOGO_URL)\n        td.setdefault(\"municipality_url\", MUNICIPALITY_URL)\n        html_template = get_template()\n        html_body = render(html_template, td) if html_template else \"\"\n        msg = {\n            \"Source\": FROM_ADDRESS,\n            \"Destination\": {\"ToAddresses\": to if isinstance(to, list) else [to]},\n            \"Message\": {\n                \"Subject\": {\"Data\": subject, \"Charset\": \"UTF-8\"},\n                \"Body\": {\"Text\": {\"Data\": text, \"Charset\": \"UTF-8\"}}\n            }\n        }\n        if cc:\n            msg[\"Destination\"][\"CcAddresses\"] = cc if isinstance(cc, list) else [cc]\n        if html_body:\n            msg[\"Message\"][\"Body\"][\"Html\"] = {\"Data\": html_body, \"Charset\": \"UTF-8\"}\n        ses.send_email(**msg)\n    return {\"statusCode\": 200}\n"
+        }
+      }
+    },
+    "SocMailSenderEventSource": {
+      "Type": "AWS::Lambda::EventSourceMapping",
+      "Properties": {
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "SocMailSendQueue",
+            "Arn"
+          ]
+        },
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "SocMailSenderLambda",
+            "Arn"
+          ]
+        },
+        "BatchSize": 10,
+        "Enabled": true
+      }
+    }
+  },
+  "Outputs": {
+    "N8nHostname": {
+      "Description": "URL de acceso a la interfaz web de n8n",
+      "Value": {
+        "Fn::Sub": "https://${N8nHostRecordName}"
+      }
+    },
+    "N8nMainServiceUrl": {
+      "Description": "URL para acceder al servicio main de n8n en ECS",
+      "Value": {
+        "Fn::Sub": [
+          "https://${AWS::Region}.console.aws.amazon.com/ecs/v2/clusters/${Cluster}/services/${Service}/details?region=${AWS::Region}",
+          {
+            "Cluster": {
+              "Ref": "ECSCluster"
+            },
+            "Service": {
+              "Fn::GetAtt": [
+                "ECSMainService",
+                "Name"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "N8nWorkerServiceUrl": {
+      "Description": "URL para acceder al servicio worker de n8n en ECS",
+      "Value": {
+        "Fn::Sub": [
+          "https://${AWS::Region}.console.aws.amazon.com/ecs/v2/clusters/${Cluster}/services/${Service}/health?region=${AWS::Region}",
+          {
+            "Cluster": {
+              "Ref": "ECSCluster"
+            },
+            "Service": {
+              "Fn::GetAtt": [
+                "ECSWorkerService",
+                "Name"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "S3BucketUrl": {
+      "Description": "Enlace al bucket S3 usado para datos binarios",
+      "Value": {
+        "Fn::Sub": "https://${AWS::Region}.console.aws.amazon.com/s3/buckets/${S3BinaryBucket}"
+      }
+    },
+    "PostgresDbUrl": {
+      "Description": "Enlace a PostgreSQL usado por n8n",
+      "Value": {
+        "Fn::Sub": "https://${AWS::Region}.console.aws.amazon.com/rds/home?region=${AWS::Region}#database:id=${PostgresDB}"
+      }
+    },
+    "RedisUrl": {
+      "Description": "Enlace a ElastiCache usado por n8n",
+      "Value": {
+        "Fn::Sub": "https://${AWS::Region}.console.aws.amazon.com/elasticache/home?region=${AWS::Region}#/redis/${Redis}"
+      }
+    },
+    "IocCloudFrontDomain": {
+      "Description": "Dominio nativo CloudFront de la distribucion IocCloudFront",
+      "Value": {
+        "Fn::GetAtt": [
+          "IocCloudFront",
+          "DomainName"
+        ]
+      },
+      "Export": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}-IocCloudFrontDomain"
+        }
+      }
+    },
+    "MailGuardLambdaArn": {
+      "Description": "ARN de la Lambda guard.",
+      "Value": {
+        "Fn::GetAtt": [
+          "MailGuardLambda",
+          "Arn"
+        ]
+      },
+      "Export": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}-MailGuardLambdaArn"
+        }
+      }
+    },
+    "MailNormalizerLambdaArn": {
+      "Description": "ARN de la Lambda normalizer.",
+      "Value": {
+        "Fn::GetAtt": [
+          "MailNormalizerLambda",
+          "Arn"
+        ]
+      },
+      "Export": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}-MailNormalizerLambdaArn"
+        }
+      }
+    },
+    "RawBucketName": {
+      "Description": "Nombre del bucket S3 con correos crudos.",
+      "Value": {
+        "Ref": "RawMailBucket"
+      },
+      "Export": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}-RawBucketName"
+        }
+      }
+    },
+    "NormalizedBucketName": {
+      "Description": "Nombre del bucket S3 con correos normalizados.",
+      "Value": {
+        "Ref": "NormalizedMailBucket"
+      },
+      "Export": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}-NormalizedBucketName"
+        }
+      }
+    },
+    "ReceiptRuleSetName": {
+      "Description": "Nombre del SES Receipt Rule Set activo.",
+      "Value": {
+        "Fn::If": [
+          "UseNewRuleSet",
+          {
+            "Ref": "SesReceiptRuleSet"
+          },
+          {
+            "Ref": "ExistingReceiptRuleSet"
+          }
+        ]
+      },
+      "Export": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}-ReceiptRuleSetName"
+        }
+      }
+    },
+    "SocMailSendQueueUrl": {
+      "Description": "URL de la cola SQS interna usada por n8n para encolar correos SOC.",
+      "Value": {
+        "Ref": "SocMailSendQueue"
+      },
+      "Export": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}-SocMailSendQueueUrl"
+        }
+      }
+    },
+    "SocMailSendQueueArn": {
+      "Description": "ARN de la cola SQS interna del sender SOC.",
+      "Value": {
+        "Fn::GetAtt": [
+          "SocMailSendQueue",
+          "Arn"
+        ]
+      },
+      "Export": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}-SocMailSendQueueArn"
+        }
+      }
+    },
+    "SocMailSenderLambdaArn": {
+      "Description": "ARN de la Lambda sender simplificada que consume desde SQS y envia via SES.",
+      "Value": {
+        "Fn::GetAtt": [
+          "SocMailSenderLambda",
+          "Arn"
+        ]
+      },
+      "Export": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}-SocMailSenderLambdaArn"
+        }
+      }
+    }
+  }
+}

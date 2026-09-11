@@ -1,0 +1,240 @@
+{
+  "name": "Bitdefender-GravityZone-Reconcile-Daily",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 3 * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -1232,
+        256
+      ],
+      "id": "ee1fd959-d863-4999-bf98-2c2706399b0e",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1232,
+        416
+      ],
+      "id": "6ea05d7d-cba4-4c6b-b6b2-1eb72d91d9ce",
+      "name": "When clicking 'Execute workflow'"
+    },
+    {
+      "parameters": {
+        "bucketName": "PLACEHOLDER_IOC_BUCKET_NAME",
+        "fileKey": "hash_sha256.txt"
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -976,
+        336
+      ],
+      "id": "ca375f85-4c65-444f-b466-dad832cbf3d5",
+      "name": "Get Desired Blocklist",
+      "credentials": {
+        "aws": {
+          "id": "CONFIGURE_AFTER_IMPORT_AWS_CRED",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const item = $input.first();\nconst binaryKeys = Object.keys(item.binary ?? {});\nconst binaryProperty = binaryKeys.includes('data') ? 'data' : binaryKeys[0];\nif (!binaryProperty) {\n  throw new Error('Desired blocklist file does not contain binary data');\n}\nconst raw = (await this.helpers.getBinaryDataBuffer(0, binaryProperty)).toString('utf8');\nif (!raw.length) {\n  throw new Error('Desired blocklist file is empty');\n}\nconst desiredLines = String(raw)\n  .split(/\\r?\\n/)\n  .map((line) => String(line).trim())\n  .filter(Boolean)\n  .filter((line) => /^([a-f0-9]{64})\\s+SHA256_[A-Z0-9_]+$/i.test(line));\nreturn {\n  json: {\n    desired_lines: [...new Set(desiredLines)].sort(),\n    desired_count: [...new Set(desiredLines)].length,\n    reconcile_started_at: new Date().toISOString()\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        336
+      ],
+      "id": "96f62fcb-1dd6-45ca-950d-a7afc4549ac3",
+      "name": "Extract Desired Blocklist"
+    },
+    {
+      "parameters": {
+        "jsCode": "const apiKey = String($env.SOC_BITDEFENDER_API_KEY || '').trim();\nconst companyId = String($env.SOC_BITDEFENDER_COMPANY_ID || '').trim();\nconst incidentsUrl = String($env.SOC_BITDEFENDER_INCIDENTS_V12_URL || '').trim();\nconst licensingUrl = String($env.SOC_BITDEFENDER_LICENSING_V10_URL || '').trim();\nconst desiredLines = Array.isArray($json.desired_lines) ? $json.desired_lines : [];\nif (!apiKey || !companyId || !incidentsUrl || !licensingUrl) {\n  throw new Error('Missing Bitdefender environment configuration');\n}\nconst chunkSize = Math.max(1, Number($env.SOC_BITDEFENDER_ADD_CHUNK_SIZE || '100'));\nconst intervalMs = Math.max(0, Number($env.SOC_BITDEFENDER_ADD_INTERVAL_SECONDS || '15')) * 1000;\nconst auth = Buffer.from(`${apiKey}:`).toString('base64');\nconst headers = {\n  Authorization: `Basic ${auth}`,\n  'Content-Type': 'application/json',\n  Accept: 'application/json'\n};\nconst sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\nconst callJsonRpc = async (url, method, params, id) => {\n  const response = await this.helpers.httpRequest({\n    method: 'POST',\n    url,\n    headers,\n    body: {\n      jsonrpc: '2.0',\n      method,\n      params,\n      id\n    },\n    json: true\n  });\n  if (response?.error) {\n    throw new Error(`${method} error ${response.error.code}: ${response.error.message}`);\n  }\n  return response?.result;\n};\nconst desiredMap = new Map();\nfor (const line of desiredLines) {\n  const match = String(line).match(/^([a-f0-9]{64})\\s+(SHA256_[A-Z0-9_]+)$/i);\n  if (!match) continue;\n  desiredMap.set(match[1].toLowerCase(), match[2].toUpperCase());\n}\nawait callJsonRpc(licensingUrl, 'getLicenseInfo', { returnAllProducts: true }, `soc-bitdefender-license-${Date.now()}`);\nconst fetchActualHashes = async () => {\n  let page = 1;\n  let pagesCount = 1;\n  const hashes = new Set();\n  do {\n    const result = await callJsonRpc(incidentsUrl, 'getBlocklistItems', { companyId, page, perPage: 100 }, `soc-bitdefender-list-${Date.now()}-${page}`);\n    const items = Array.isArray(result?.items) ? result.items : [];\n    pagesCount = Number(result?.pagesCount || 1);\n    for (const item of items) {\n      if (String(item?.type || '').toLowerCase() !== 'hash') continue;\n      const details = item?.details || {};\n      if (String(details?.algorithm || '').toLowerCase() !== 'sha256') continue;\n      const hash = String(details?.hash || '').trim().toLowerCase();\n      if (/^[a-f0-9]{64}$/.test(hash)) {\n        hashes.add(hash);\n      }\n    }\n    page += 1;\n  } while (page <= pagesCount);\n  return hashes;\n};\nlet actualHashes = await fetchActualHashes();\nconst missing = [...desiredMap.keys()].filter((hash) => !actualHashes.has(hash));\nconst addedBatches = [];\nfor (let i = 0; i < missing.length; i += chunkSize) {\n  const batch = missing.slice(i, i + chunkSize);\n  const rules = batch.map((hash) => ({\n    note: `SOC|source=hash_sha256.txt|tag=${desiredMap.get(hash)}`,\n    details: {\n      algorithm: 'sha256',\n      hash\n    }\n  }));\n  const requestId = `soc-bitdefender-reconcile-${Date.now()}-${i / chunkSize + 1}`;\n  const result = await callJsonRpc(incidentsUrl, 'addToBlocklist', { companyId, type: 'hash', rules, recursive: false }, requestId);\n  if (result !== true) {\n    throw new Error(`Unexpected addToBlocklist result for batch ${i / chunkSize + 1}`);\n  }\n  addedBatches.push({ request_id: requestId, count: batch.length });\n  if (i + chunkSize < missing.length && intervalMs > 0) {\n    await sleep(intervalMs);\n  }\n}\nactualHashes = await fetchActualHashes();\nconst confirmedHashes = [...desiredMap.keys()]\n  .filter((hash) => actualHashes.has(hash))\n  .sort();\nconst confirmedLines = confirmedHashes.map((hash) => `${hash} ${desiredMap.get(hash)}`);\nconst confirmedCount = confirmedHashes.length;\nconst pendingAfter = [...desiredMap.keys()].filter((hash) => !actualHashes.has(hash));\nconst nowIso = new Date().toISOString();\nconst today = new Date();\nconst yyyy = today.getUTCFullYear();\nconst mm = String(today.getUTCMonth() + 1).padStart(2, '0');\nconst dd = String(today.getUTCDate()).padStart(2, '0');\nreturn [{\n  json: {\n    known_present_text: confirmedHashes.length ? `${confirmedHashes.join('\\n')}\\n` : '',\n    full_status_json: JSON.stringify({\n      scope: 'daily_reconcile',\n      reconcile_started_at: $json.reconcile_started_at,\n      reconcile_completed_at: nowIso,\n      desired_count: desiredMap.size,\n      actual_confirmed_count: confirmedCount,\n      missing_before_count: missing.length,\n      pending_after_count: pendingAfter.length,\n      added_batches: addedBatches\n    }, null, 2),\n    audit_json: JSON.stringify({\n      scope: 'daily_reconcile',\n      reconcile_started_at: $json.reconcile_started_at,\n      reconcile_completed_at: nowIso,\n      desired_lines: desiredLines,\n      confirmed_lines: confirmedLines,\n      confirmed_hashes: confirmedHashes,\n      missing_before_count: missing.length,\n      pending_after: pendingAfter,\n      added_batches: addedBatches\n    }, null, 2),\n    audit_key: `gravityzone/audit/bitdefender-reconcile-${yyyy}-${mm}-${dd}.json`\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -464,
+        336
+      ],
+      "id": "ef914f51-b4d1-4f43-ad15-d5747797fd28",
+      "name": "Reconcile With Bitdefender"
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "PLACEHOLDER_IOC_BUCKET_NAME",
+        "fileName": "gravityzone/state/bitdefender_known_present_sha256.txt",
+        "binaryData": false,
+        "fileContent": "={{$json.known_present_text}}",
+        "additionalFields": {
+          "contentType": "text/plain; charset=utf-8"
+        }
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -208,
+        240
+      ],
+      "id": "8fe03c2f-7266-4cdf-8634-d57eed674316",
+      "name": "Save Known Present",
+      "credentials": {
+        "aws": {
+          "id": "CONFIGURE_AFTER_IMPORT_AWS_CRED",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "PLACEHOLDER_IOC_BUCKET_NAME",
+        "fileName": "gravityzone/state/last_full_reconcile.json",
+        "binaryData": false,
+        "fileContent": "={{$json.full_status_json}}",
+        "additionalFields": {
+          "contentType": "application/json; charset=utf-8"
+        }
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -208,
+        368
+      ],
+      "id": "4b90b5aa-d474-4359-bc72-c464fd57d40c",
+      "name": "Save Full Reconcile Status",
+      "credentials": {
+        "aws": {
+          "id": "CONFIGURE_AFTER_IMPORT_AWS_CRED",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "PLACEHOLDER_IOC_BUCKET_NAME",
+        "fileName": "={{$json.audit_key}}",
+        "binaryData": false,
+        "fileContent": "={{$json.audit_json}}",
+        "additionalFields": {
+          "contentType": "application/json; charset=utf-8"
+        }
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -208,
+        496
+      ],
+      "id": "4a5b4a02-dc2e-4041-80c3-63be40a8fd83",
+      "name": "Save Audit",
+      "credentials": {
+        "aws": {
+          "id": "CONFIGURE_AFTER_IMPORT_AWS_CRED",
+          "name": "AWS (IAM) account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Desired Blocklist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking 'Execute workflow'": {
+      "main": [
+        [
+          {
+            "node": "Get Desired Blocklist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Desired Blocklist": {
+      "main": [
+        [
+          {
+            "node": "Extract Desired Blocklist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Desired Blocklist": {
+      "main": [
+        [
+          {
+            "node": "Reconcile With Bitdefender",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reconcile With Bitdefender": {
+      "main": [
+        [
+          {
+            "node": "Save Known Present",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Save Full Reconcile Status",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Save Audit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Santiago"
+  },
+  "versionId": "0d12d350-acb7-4974-854b-ed2bfc873c11",
+  "meta": {
+    "instanceId": "61e8ffdf70f7e7470bda3b1b1cdea1f0ac31372175670632905cc3a9df825f76"
+  },
+  "id": "bitdefenderGravityZoneReconcileDaily",
+  "tags": []
+}

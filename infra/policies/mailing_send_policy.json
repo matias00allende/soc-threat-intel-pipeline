@@ -1,0 +1,44 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:*:*:*",
+      "Effect": "Allow"
+    },
+    {
+      "Action": [
+        "ses:SendEmail",
+        "ses:SendRawEmail"
+      ],
+      "Resource": [
+        "arn:aws:ses:PLACEHOLDER_REGION:PLACEHOLDER_ACCOUNT_ID:identity/PLACEHOLDER_MAILING_DOMAIN",
+        "arn:aws:ses:PLACEHOLDER_REGION:PLACEHOLDER_ACCOUNT_ID:identity/PLACEHOLDER_CLOUD_EMAIL",
+        "arn:aws:ses:PLACEHOLDER_REGION:PLACEHOLDER_ACCOUNT_ID:identity/PLACEHOLDER_SOC_BOT_EMAIL",
+        "arn:aws:ses:PLACEHOLDER_REGION:PLACEHOLDER_ACCOUNT_ID:configuration-set/PLACEHOLDER_SES_CONFIG_SET"
+      ],
+      "Effect": "Allow"
+    },
+    {
+      "Action": [
+        "dynamodb:GetItem"
+      ],
+      "Resource": "arn:aws:dynamodb:PLACEHOLDER_REGION:PLACEHOLDER_ACCOUNT_ID:table/PLACEHOLDER_SUPPRESSION_TABLE",
+      "Effect": "Allow"
+    },
+    {
+      "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:ChangeMessageVisibility"
+      ],
+      "Resource": "arn:aws:sqs:PLACEHOLDER_REGION:PLACEHOLDER_ACCOUNT_ID:PLACEHOLDER_SEND_QUEUE_NAME",
+      "Effect": "Allow"
+    }
+  ]
+}

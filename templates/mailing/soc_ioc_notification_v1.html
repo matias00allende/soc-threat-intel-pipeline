@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="es" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="x-apple-disable-message-reformatting">
+  <meta name="color-scheme" content="light dark">
+  <meta name="supported-color-schemes" content="light dark">
+  <title>Se han registrado nuevos IoC</title>
+  <style>
+    body, table, td, p, a {
+      font-family: Arial, Helvetica, sans-serif;
+    }
+
+    .body-bg {
+      background-color: #ecf1f5 !important;
+    }
+
+    .shell {
+      background-color: #ffffff !important;
+      border: 1px solid #d5e0ea !important;
+    }
+
+    .hero {
+      background-color: #242b68 !important;
+      background-image: linear-gradient(135deg, #242b68 0%, #2e367f 100%) !important;
+    }
+
+    .logo-wrap {
+      background-color: #ffffff !important;
+    }
+
+    .muted {
+      color: #5f7288 !important;
+    }
+
+    .body-text {
+      color: #18324a !important;
+    }
+
+    .metric-card {
+      background-color: #f8fafc !important;
+      border: 1px solid #d5e0ea !important;
+    }
+
+    .metric-label {
+      color: #5f7288 !important;
+    }
+
+    .metric-total {
+      color: #242b68 !important;
+    }
+
+    .metric-new {
+      color: #1c7c54 !important;
+    }
+
+    .metric-corrected {
+      color: #d97706 !important;
+    }
+
+    .ioc-box {
+      background-color: #f9fbfd !important;
+      border: 1px solid #d5e0ea !important;
+    }
+
+    .ioc-lines {
+      color: #263a50 !important;
+    }
+
+    .footer-band {
+      background-color: #242b68 !important;
+    }
+
+    .footer-text {
+      color: #dfe6f3 !important;
+    }
+
+    .accent-line {
+      background-color: #f28c00 !important;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .body-bg {
+        background-color: #101821 !important;
+      }
+
+      .shell {
+        background-color: #16212d !important;
+        border-color: #304252 !important;
+      }
+
+      .logo-wrap {
+        background-color: #ffffff !important;
+      }
+
+      .metric-card,
+      .ioc-box {
+        background-color: #1c2a38 !important;
+        border-color: #324557 !important;
+      }
+
+      .body-text,
+      .ioc-lines {
+        color: #edf3fa !important;
+      }
+
+      .muted,
+      .metric-label {
+        color: #b7c6d6 !important;
+      }
+    }
+  </style>
+</head>
+<body class="body-bg" style="margin:0;padding:0;background-color:#ecf1f5;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">
+    {{preheader}}
+  </div>
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="body-bg" style="background-color:#ecf1f5;">
+    <tr>
+      <td align="center" style="padding:28px 14px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:760px;">
+          <tr>
+            <td class="shell" style="background-color:#ffffff;border:1px solid #d5e0ea;border-radius:24px;overflow:hidden;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                <tr>
+                  <td class="hero" style="background-color:#242b68;background-image:linear-gradient(135deg,#242b68 0%,#2e367f 100%);padding:24px 28px 20px;">
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                      <tr>
+                        <td valign="top" style="padding-right:16px;">
+                          <div style="display:inline-block;padding:8px 12px;border:1px solid rgba(255,255,255,0.18);border-radius:999px;font-size:11px;line-height:1;text-transform:uppercase;letter-spacing:0.12em;color:#e9eef8;">
+                            Ingesta de IoC
+                          </div>
+                          <h1 style="margin:16px 0 0;font-size:30px;line-height:1.15;font-weight:700;color:#ffffff;">
+                            {{title}}
+                          </h1>
+                          <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#e4ebf5;max-width:440px;">
+                            {{intro_line}}
+                          </p>
+                          <p style="margin:10px 0 0;font-size:13px;line-height:1.7;color:#f4d8b1;max-width:470px;">
+                            {{status_line}}
+                          </p>
+                        </td>
+                        <td align="right" valign="top" width="210">
+                          <table role="presentation" cellpadding="0" cellspacing="0" border="0" class="logo-wrap" style="background-color:#ffffff;border-radius:18px;">
+                            <tr>
+                              <td style="padding:14px 16px;">
+                                <img src="{{ municipality_logo_url | default('') }}" alt="{{ municipality_name | default('') }}" width="178" style="display:block;width:178px;max-width:100%;height:auto;border:0;">
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td class="accent-line" height="6" style="background-color:#f28c00;font-size:0;line-height:0;">&nbsp;</td>
+                </tr>
+                <tr>
+                  <td style="padding:24px 28px 10px;">
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                      <tr>
+                        <td width="33.33%" style="padding:0 8px 14px 0;">
+                          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="metric-card" style="background-color:#f8fafc;border:1px solid #d5e0ea;border-radius:16px;">
+                            <tr>
+                              <td style="padding:16px 18px;">
+                                <div class="metric-label" style="font-size:11px;line-height:1.2;text-transform:uppercase;letter-spacing:0.12em;color:#5f7288;">Total procesados</div>
+                                <div class="metric-total" style="margin-top:8px;font-size:30px;line-height:1;font-weight:700;color:#242b68;">{{total_action_count}}</div>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                        <td width="33.33%" style="padding:0 8px 14px;">
+                          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="metric-card" style="background-color:#f8fafc;border:1px solid #d5e0ea;border-radius:16px;">
+                            <tr>
+                              <td style="padding:16px 18px;">
+                                <div class="metric-label" style="font-size:11px;line-height:1.2;text-transform:uppercase;letter-spacing:0.12em;color:#5f7288;">Nuevos</div>
+                                <div class="metric-new" style="margin-top:8px;font-size:30px;line-height:1;font-weight:700;color:#1c7c54;">{{new_count}}</div>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                        <td width="33.33%" style="padding:0 0 14px 8px;">
+                          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="metric-card" style="background-color:#f8fafc;border:1px solid #d5e0ea;border-radius:16px;">
+                            <tr>
+                              <td style="padding:16px 18px;">
+                                <div class="metric-label" style="font-size:11px;line-height:1.2;text-transform:uppercase;letter-spacing:0.12em;color:#5f7288;">Corregidos</div>
+                                <div class="metric-corrected" style="margin-top:8px;font-size:30px;line-height:1;font-weight:700;color:#d97706;">{{corrected_count}}</div>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:6px 28px 0;">
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="ioc-box" style="background-color:#f9fbfd;border:1px solid #d5e0ea;border-radius:18px;">
+                      <tr>
+                        <td style="padding:22px 22px 16px;">
+                          <div class="body-text" style="font-size:16px;line-height:1.3;font-weight:700;color:#18324a;">Indicadores procesados</div>
+                          <div class="muted" style="margin-top:6px;font-size:13px;line-height:1.6;color:#5f7288;">
+                            Resumen operativo de la actualización aplicada sobre la lista de IoC.
+                          </div>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="padding:0 22px 22px;">
+                          <div class="ioc-lines" style="font-size:13px;line-height:1.75;color:#263a50;font-family:Consolas,'Courier New',monospace;white-space:pre-wrap;word-break:break-word;">
+                            {{ioc_lines_block}}
+                          </div>
+                          {{remaining_notice}}
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:20px 28px 22px;">
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                      <tr>
+                        <td valign="top" style="padding:0 16px 0 0;">
+                          <div class="muted" style="font-size:12px;line-height:1.5;color:#5f7288;text-transform:uppercase;letter-spacing:0.08em;">{{source_label}}</div>
+                          <div class="body-text" style="margin-top:6px;font-size:14px;line-height:1.6;color:#18324a;">{{source_value}}</div>
+                        </td>
+                        <td valign="top" width="220">
+                          <div class="muted" style="font-size:12px;line-height:1.5;color:#5f7288;text-transform:uppercase;letter-spacing:0.08em;">Generado</div>
+                          <div class="body-text" style="margin-top:6px;font-size:14px;line-height:1.6;color:#18324a;">{{generated_at}}</div>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td class="footer-band" style="background-color:#242b68;padding:22px 28px 26px;">
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                      <tr>
+                        <td valign="top" style="padding-right:18px;">
+                          <div class="footer-text" style="font-size:14px;line-height:1.65;color:#dfe6f3;">
+                            {{ municipality_name | default('') }}.<br>
+                            Área de Ciberseguridad.
+                          </div>
+                        </td>
+                        <td align="right" valign="top" width="220">
+                          <div class="footer-text" style="font-size:12px;line-height:1.5;color:#dfe6f3;text-transform:uppercase;letter-spacing:0.08em;">
+                            Portal institucional
+                          </div>
+                          <div style="margin-top:8px;">
+                            <a href="{{ municipality_url | default('#') }}" style="color:#ffffff;text-decoration:none;font-size:16px;line-height:1.4;font-weight:700;">{{ municipality_url | default('') | replace('https://','') | replace('http://','') }}</a>
+                          </div>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

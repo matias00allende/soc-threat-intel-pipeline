@@ -1,0 +1,16 @@
+{
+  "Comment": "Enable SES inbound for PLACEHOLDER_MAILING_SUBDOMAIN_HOSTNAME",
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "PLACEHOLDER_MAILING_SUBDOMAIN_HOSTNAME.",
+        "Type": "MX",
+        "TTL": 300,
+        "ResourceRecords": [
+          { "Value": "10 inbound-smtp.us-east-1.amazonaws.com" }
+        ]
+      }
+    }
+  ]
+}

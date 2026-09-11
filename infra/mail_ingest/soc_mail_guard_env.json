@@ -1,0 +1,6 @@
+{
+  "Variables": {
+    "ALLOWED_RECIPIENT": "PLACEHOLDER_INGEST_EMAIL",
+    "ALLOWED_SENDER_DOMAINS": "yourdomain.cl,trusted-vendor.com"
+  }
+}

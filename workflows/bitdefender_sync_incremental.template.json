@@ -1,0 +1,421 @@
+{
+  "name": "Bitdefender-GravityZone-Sync-Incremental",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -1648,
+        256
+      ],
+      "id": "1f4c9398-a1e2-4f15-a7f8-4933611d4307",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1648,
+        416
+      ],
+      "id": "f7b287be-4ff8-4890-bf52-95c6f236e2aa",
+      "name": "When clicking 'Execute workflow'"
+    },
+    {
+      "parameters": {
+        "bucketName": "PLACEHOLDER_IOC_BUCKET_NAME",
+        "fileKey": "hash_sha256.txt"
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -1376,
+        336
+      ],
+      "id": "a2de4f7d-a3cc-4da3-98fa-f3495f46d90f",
+      "name": "Get Desired Blocklist",
+      "credentials": {
+        "aws": {
+          "id": "CONFIGURE_AFTER_IMPORT_AWS_CRED",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const item = $input.first();\nconst binaryKeys = Object.keys(item.binary ?? {});\nconst binaryProperty = binaryKeys.includes('data') ? 'data' : binaryKeys[0];\nif (!binaryProperty) {\n  throw new Error('Desired blocklist file does not contain binary data');\n}\nconst raw = (await this.helpers.getBinaryDataBuffer(0, binaryProperty)).toString('utf8');\nif (!raw.length) {\n  throw new Error('Desired blocklist file is empty');\n}\nconst desiredMap = new Map();\nfor (const rawLine of String(raw).split(/\\r?\\n/)) {\n  const line = String(rawLine).trim();\n  if (!line) continue;\n  const match = line.match(/^([a-f0-9]{64})\\s+(SHA256_[A-Z0-9_]+)$/i);\n  if (!match) continue;\n  desiredMap.set(match[1].toLowerCase(), match[2].toUpperCase());\n}\nconst desiredHashes = [...desiredMap.keys()].sort();\nconst desiredLines = desiredHashes.map((hash) => `${hash} ${desiredMap.get(hash)}`);\nreturn {\n  json: {\n    desired_raw: raw,\n    desired_lines: desiredLines,\n    desired_hashes: desiredHashes,\n    desired_map: Object.fromEntries(desiredMap),\n    desired_count: desiredHashes.length\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1136,
+        336
+      ],
+      "id": "6845c515-8be4-4588-a4bd-9c3117a8fd76",
+      "name": "Extract Desired Blocklist"
+    },
+    {
+      "parameters": {
+        "bucketName": "PLACEHOLDER_IOC_BUCKET_NAME",
+        "fileKey": "gravityzone/state/bitdefender_known_present_sha256.txt"
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -1136,
+        544
+      ],
+      "id": "147f9fb0-dca8-4b6b-81b4-7917282f9906",
+      "name": "Get Known Present",
+      "credentials": {
+        "aws": {
+          "id": "CONFIGURE_AFTER_IMPORT_AWS_CRED",
+          "name": "AWS (IAM) account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const item = $input.first();\nconst binaryKeys = Object.keys(item.binary ?? {});\nconst binaryProperty = binaryKeys.includes('data') ? 'data' : binaryKeys[0];\nif (!binaryProperty) {\n  return { json: { known_present_raw: '', known_present_hashes: [], known_present_count: 0 } };\n}\nconst raw = (await this.helpers.getBinaryDataBuffer(0, binaryProperty)).toString('utf8');\nif (!raw.length) {\n  return { json: { known_present_raw: '', known_present_hashes: [], known_present_count: 0 } };\n}\nconst hashes = String(raw)\n  .split(/\\r?\\n/)\n  .map((line) => String(line).trim().toLowerCase())\n  .filter(Boolean)\n  .filter((line) => /^[a-f0-9]{64}$/i.test(line));\nconst uniqueHashes = [...new Set(hashes)].sort();\nreturn {\n  json: {\n    known_present_raw: raw,\n    known_present_hashes: uniqueHashes,\n    known_present_count: uniqueHashes.length\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -896,
+        544
+      ],
+      "id": "a9094227-d27e-4dcb-8260-78236a48d835",
+      "name": "Extract Known Present"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        -656,
+        432
+      ],
+      "id": "0eb659dd-3e34-44c4-b2f0-c22a8829e56f",
+      "name": "Merge Desired and Known"
+    },
+    {
+      "parameters": {
+        "jsCode": "const desiredMap = $json.desired_map && typeof $json.desired_map === 'object' ? $json.desired_map : {};\nconst desiredHashes = Array.isArray($json.desired_hashes) ? $json.desired_hashes.map((hash) => String(hash).trim().toLowerCase()).filter(Boolean) : [];\nconst knownHashes = Array.isArray($json.known_present_hashes) ? $json.known_present_hashes.map((hash) => String(hash).trim().toLowerCase()).filter(Boolean) : [];\nconst desiredSet = new Set(desiredHashes);\nconst knownSet = new Set(knownHashes);\nconst deltaHashes = [...desiredSet].filter((hash) => !knownSet.has(hash));\nconst chunkSize = Math.max(1, Number($env.SOC_BITDEFENDER_ADD_CHUNK_SIZE || '100'));\nconst chunkHashes = deltaHashes.slice(0, chunkSize);\nconst chunkLines = chunkHashes.map((hash) => `${hash} ${String(desiredMap[hash] || 'SHA256_UNKNOWN').toUpperCase()}`);\nreturn [{\n  json: {\n    desired_lines: [...desiredSet].map((hash) => `${hash} ${String(desiredMap[hash] || 'SHA256_UNKNOWN').toUpperCase()}`),\n    desired_hashes: [...desiredSet].sort(),\n    desired_count: desiredSet.size,\n    desired_map: desiredMap,\n    known_present_hashes: [...knownSet].sort(),\n    known_present_count: knownSet.size,\n    delta_total_count: deltaHashes.length,\n    chunk_hashes: chunkHashes,\n    chunk_lines: chunkLines,\n    chunk_count: chunkHashes.length,\n    chunk_size: chunkSize,\n    sync_started_at: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -416,
+        432
+      ],
+      "id": "3cf9f0f4-147d-4a5a-9f31-303f63c7b650",
+      "name": "Compute Incremental Delta"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "e429edec-4e4d-4ecb-98d4-a001c6749122",
+              "leftValue": "={{$json.chunk_count}}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -176,
+        432
+      ],
+      "id": "8dfafaf6-14c5-4fd7-b0e2-9e4ff74e1169",
+      "name": "If Has Delta"
+    },
+    {
+      "parameters": {
+        "jsCode": "const apiKey = String($env.SOC_BITDEFENDER_API_KEY || '').trim();\nconst companyId = String($env.SOC_BITDEFENDER_COMPANY_ID || '').trim();\nconst incidentsUrl = String($env.SOC_BITDEFENDER_INCIDENTS_V12_URL || '').trim();\nconst chunkLines = Array.isArray($json.chunk_lines) ? $json.chunk_lines : [];\nif (!apiKey || !companyId || !incidentsUrl) {\n  throw new Error('Missing Bitdefender environment configuration');\n}\nif (!chunkLines.length) {\n  return [{ json: { ...$json, add_request_id: '', add_result: 'noop', added_lines: [], added_hashes: [], added_count: 0, sync_completed_at: new Date().toISOString() } }];\n}\nconst auth = Buffer.from(`${apiKey}:`).toString('base64');\nconst rules = chunkLines.map((line) => {\n  const match = String(line).match(/^([a-f0-9]{64})\\s+(SHA256_[A-Z0-9_]+)$/i);\n  if (!match) {\n    throw new Error(`Invalid line for Bitdefender sync: ${line}`);\n  }\n  const hash = match[1].toLowerCase();\n  const tag = match[2].toUpperCase();\n  return {\n    note: `SOC|source=hash_sha256.txt|tag=${tag}`,\n    details: {\n      algorithm: 'sha256',\n      hash\n    }\n  };\n});\nconst requestId = `soc-bitdefender-incremental-${Date.now()}`;\nconst response = await this.helpers.httpRequest({\n  method: 'POST',\n  url: incidentsUrl,\n  headers: {\n    Authorization: `Basic ${auth}`,\n    'Content-Type': 'application/json',\n    Accept: 'application/json'\n  },\n  body: {\n    jsonrpc: '2.0',\n    method: 'addToBlocklist',\n    params: {\n      companyId,\n      type: 'hash',\n      rules,\n      recursive: false\n    },\n    id: requestId\n  },\n  json: true\n});\nif (response?.error) {\n  throw new Error(`Bitdefender addToBlocklist error ${response.error.code}: ${response.error.message}`);\n}\nif (response?.result !== true) {\n  throw new Error(`Bitdefender addToBlocklist returned unexpected result: ${JSON.stringify(response)}`);\n}\nconst addedHashes = rules.map((rule) => String(rule.details.hash).toLowerCase());\nreturn [{\n  json: {\n    ...$json,\n    add_request_id: requestId,\n    add_result: 'success',\n    added_lines: chunkLines,\n    added_hashes: addedHashes,\n    added_count: chunkLines.length,\n    sync_completed_at: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        64,
+        336
+      ],
+      "id": "1c2dca7b-38cb-4879-84c6-9d3be518ff14",
+      "name": "Add To Bitdefender"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const knownHashes = Array.isArray($json.known_present_hashes) ? $json.known_present_hashes : [];\nconst addedHashes = Array.isArray($json.added_hashes) ? $json.added_hashes : [];\nconst merged = [...new Set([...knownHashes, ...addedHashes].map((hash) => String(hash).trim().toLowerCase()).filter(Boolean))].sort();\nreturn {\n  json: {\n    ...$json,\n    known_present_hashes: merged,\n    known_present_text: merged.length ? `${merged.join('\\n')}\\n` : '',\n    known_present_count_after: merged.length\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        304,
+        336
+      ],
+      "id": "f36b4ea7-7b51-47f6-b727-84bd236cf867",
+      "name": "Update Known Present"
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "PLACEHOLDER_IOC_BUCKET_NAME",
+        "fileName": "gravityzone/state/bitdefender_known_present_sha256.txt",
+        "binaryData": false,
+        "fileContent": "={{$json.known_present_text}}",
+        "additionalFields": {
+          "contentType": "text/plain; charset=utf-8"
+        }
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        544,
+        336
+      ],
+      "id": "4cf62741-b3fa-4287-bb1d-70dd02db8558",
+      "name": "Save Known Present",
+      "credentials": {
+        "aws": {
+          "id": "CONFIGURE_AFTER_IMPORT_AWS_CRED",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const knownBefore = Number($json.known_present_count || 0);\nconst knownAfter = Number($json.known_present_count_after || knownBefore);\nconst addedCount = Number($json.added_count || 0);\nconst status = addedCount > 0 ? 'applied' : 'noop';\nreturn {\n  json: {\n    status_json: JSON.stringify({\n      scope: 'incremental',\n      status,\n      sync_started_at: $json.sync_started_at,\n      sync_completed_at: $json.sync_completed_at || new Date().toISOString(),\n      desired_count: Number($json.desired_count || 0),\n      known_present_count_before: knownBefore,\n      known_present_count_after: knownAfter,\n      delta_total_count: Number($json.delta_total_count || 0),\n      added_count: addedCount,\n      add_request_id: $json.add_request_id || ''\n    }, null, 2)\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        544,
+        496
+      ],
+      "id": "25a1dc2d-d15e-4a07-956f-997f9886388f",
+      "name": "Build Incremental Status"
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "PLACEHOLDER_IOC_BUCKET_NAME",
+        "fileName": "gravityzone/state/last_incremental_sync.json",
+        "binaryData": false,
+        "fileContent": "={{$json.status_json}}",
+        "additionalFields": {
+          "contentType": "application/json; charset=utf-8"
+        }
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        784,
+        496
+      ],
+      "id": "35679d79-fb17-4257-a3b0-d0ce08cb50ba",
+      "name": "Save Incremental Status",
+      "credentials": {
+        "aws": {
+          "id": "CONFIGURE_AFTER_IMPORT_AWS_CRED",
+          "name": "AWS (IAM) account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Desired Blocklist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking 'Execute workflow'": {
+      "main": [
+        [
+          {
+            "node": "Get Desired Blocklist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Desired Blocklist": {
+      "main": [
+        [
+          {
+            "node": "Extract Desired Blocklist",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Known Present",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Desired Blocklist": {
+      "main": [
+        [
+          {
+            "node": "Merge Desired and Known",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Known Present": {
+      "main": [
+        [
+          {
+            "node": "Extract Known Present",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Known Present": {
+      "main": [
+        [
+          {
+            "node": "Merge Desired and Known",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Desired and Known": {
+      "main": [
+        [
+          {
+            "node": "Compute Incremental Delta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Incremental Delta": {
+      "main": [
+        [
+          {
+            "node": "If Has Delta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Has Delta": {
+      "main": [
+        [
+          {
+            "node": "Add To Bitdefender",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Incremental Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add To Bitdefender": {
+      "main": [
+        [
+          {
+            "node": "Update Known Present",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Known Present": {
+      "main": [
+        [
+          {
+            "node": "Save Known Present",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Incremental Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Incremental Status": {
+      "main": [
+        [
+          {
+            "node": "Save Incremental Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Santiago"
+  },
+  "versionId": "545abfb0-3f44-4f39-aaf9-d4e63b83f7eb",
+  "meta": {
+    "instanceId": "61e8ffdf70f7e7470bda3b1b1cdea1f0ac31372175670632905cc3a9df825f76"
+  },
+  "id": "bitdefenderGravityZoneSyncIncremental",
+  "tags": []
+}
