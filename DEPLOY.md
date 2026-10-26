@@ -43,7 +43,7 @@ Antes de comenzar, verificar que se cumple cada punto:
 
 ### n8n
 
-- [ ] Licencia n8n - la Community Edition no soporta queue mode (main + worker separados). Para escalar con main y worker independientes se requiere licencia Starter o superior. Sin licencia, n8n corre en modo single-process (un solo contenedor ECS), lo que limita la concurrencia.
+- [ ] Licencia n8n - opcional. Sin licencia, este despliegue corre n8n en un solo contenedor ECS, lo que limita la concurrencia. Según la documentación de n8n, solo la configuración con varios procesos main (multi-main) exige licencia Enterprise; revisar ahí qué incluye cada plan antes de escalar.
   - Obtener en: https://app.n8n.io/
 
 ### Local
@@ -152,7 +152,7 @@ Copiar `config.example.env` a `config.env` y completar todos los valores antes d
 
 | Variable | Descripción | Ejemplo | Requerido |
 |----------|-------------|---------|-----------|
-| `N8N_LICENSE_KEY` | Clave de licencia n8n (vacío = Community Edition, sin queue mode) | `n8n_... ` | Recomendado |
+| `N8N_LICENSE_KEY` | Clave de licencia n8n (vacío = Community Edition, un solo contenedor ECS) | `n8n_... ` | Recomendado |
 | `N8N_IMAGE_URI` | Imagen Docker de n8n | `n8nio/n8n:latest` | Sí |
 | `N8N_WEBHOOK_BASE_URL` | URL base del webhook | `https://n8n.ejemplo.cl/webhook/soc` | Sí |
 | `N8N_TASK_CPU` | CPU ECS en unidades (512 = 0.5 vCPU) | `512` | Sí |
@@ -391,7 +391,7 @@ aws s3 cp templates/mailing/soc_ioc_notification_v1.html \
 
 **Tiempo estimado:** ~25 minutos. Si el stack falla, revisar Events en la consola CloudFormation para identificar el recurso en error.
 
-> **Nota sobre `MailTemplateBucketName`:** este parametro apunta a un bucket S3 que el stack asume existente. No se crea como recurso del template. Si reutilizas `S3_BUCKET_IOC` (creado por el stack), el orden de los Pasos 8-12 funciona porque el bucket ya existe cuando se sube el HTML. Si prefieres un bucket dedicado, crearlo antes del Paso 8 con `aws s3 mb` y pasar su nombre como `MailTemplateBucketName`.
+> **Nota sobre `MailTemplateBucketName`:** este parametro apunta a un bucket S3 que el stack asume existente. No se crea como recurso del template. Si reutilizas `S3_BUCKET_IOC` (creado a mano antes de desplegar el stack, porque el template no lo declara), el orden de los Pasos 8-12 funciona porque el bucket ya existe cuando se sube el HTML. Si prefieres un bucket dedicado, crearlo antes del Paso 8 con `aws s3 mb` y pasar su nombre como `MailTemplateBucketName`.
 
 ---
 
@@ -401,7 +401,7 @@ Este modo despliega tres stacks en orden de dependencia. El stack de mailing ext
 
 ### Que es el stack de mailing externo
 
-En modo desacoplado, n8n NO envia correos directamente. Publica mensajes en una cola SQS, y otra Lambda (que vive en un stack separado) consume la cola y envia via SES. Esto permite que multiples proyectos compartan la misma flota de envio, separadores de bounce/complaint y reportes mensuales.
+En modo desacoplado, n8n no envía correos directamente. Publica mensajes en una cola SQS y otra Lambda (que vive en un stack separado) consume la cola y envía vía SES. Esto permite que múltiples proyectos compartan la misma flota de envío, separadores de bounce/complaint y reportes mensuales.
 
 Como referencia se ofrece el repositorio interno `mailing-plataformas` (no publico). Cualquier stack que cumpla el siguiente contrato sirve:
 
@@ -601,7 +601,7 @@ El workflow `Boletines-CSOC.template.json` incluye protecciones de calidad antes
   ```js
   const MIN_EXPECTED_EXISTING_SHA_COUNT = 1000;  // ajustar al volumen real
   ```
-- **Recomendacion:** despues del primer despliegue real con datos productivos, fijar este valor al 90% del tamano estable observado en S3.
+- **Recomendación:** después del primer despliegue con datos de producción, fijar este valor al 90% del tamano estable observado en S3.
 
 **Nodo `Extract IoC Input` y nodo IF subsiguiente** (filtro de calidad de input):
 
@@ -771,9 +771,9 @@ cruzado antes de crear un endpoint de este tipo en una VPC compartida con otros 
 |---------|----------------|----------|
 | Lambda `soc-mail-guard` rechaza todos los correos | `ALLOWED_RECIPIENT` no coincide exactamente con la dirección real del MX configurado en SES | Verificar que la variable de entorno de la Lambda coincide exactamente (incluyendo mayúsculas/minúsculas) con `INGEST_EMAIL_ADDRESS` |
 | Nodo AWS en n8n falla con `InvalidClientTokenId` | Credential ID incorrecto post-import - los placeholders `CONFIGURE_AFTER_IMPORT_*` no fueron reemplazados | Abrir cada nodo marcado en el editor, seleccionar la credencial AWS real creada en n8n |
-| SES no entrega correos a la Lambda | Receipt Rule inactiva o SES en modo sandbox | Verificar en SES → Email receiving que el Rule Set está activo; si se envía a dirección no verificada en sandbox, solicitar salida del sandbox en Support Center |
+| SES no entrega correos a la Lambda | Receipt Rule inactiva, dominio sin verificar o registro MX apuntando a otra región | Verificar en SES → Email receiving que el Rule Set está activo, que el dominio está verificado y que el MX corresponde a la región de recepción. El sandbox de SES restringe el envío, no la recepción |
 | Workflow falla con "Blocklist shrunk" | Bucket `S3_BUCKET_IOC` vacío o con menos de 1000 líneas en `hash_sha256.txt` | Inicializar el archivo con al menos 1000 hashes de prueba (ver Paso 4 de la sección de despliegue) |
 | n8n worker no procesa trabajos de la cola | Redis no accesible o credenciales del secreto `SECRET_NAME_REDIS` incorrectas | Verificar en Secrets Manager que el secreto existe y tiene el campo `auth_token`; revisar SG de Redis (solo accesible desde ECS SG) |
-| Stack create falla en recurso ECS | Imagen `n8nio/n8n:latest` no accesible desde la VPC | Verificar que la VPC tiene NAT Gateway activo o VPC endpoint para ECR/DockerHub; alternativamente, replicar la imagen en ECR privado y actualizar `N8N_IMAGE_URI` |
+| Stack create falla en recurso ECS | Imagen `n8nio/n8n:latest` no accesible desde la VPC | Para descargar desde DockerHub, verificar que la VPC tiene un NAT Gateway activo. Con endpoints de ECR y S3 solo se pueden descargar imágenes replicadas en un ECR privado: en ese caso, actualizar `N8N_IMAGE_URI` |
 | Ejecuciones duplicadas de un workflow con schedule trigger | `main` escalado a más de 1 instancia sin `N8N_MULTI_MAIN_SETUP=true` | Confirmar que la variable está presente en la task definition de `main` (ya viene por defecto en este template); si se desplegó con `--use-previous-template` sobre una versión antigua, actualizar |
 | Nodo AWS S3/SQS en n8n falla con `NoSuchKey`/`AccessDenied` justo después de rotar una credencial AWS | `main`/`worker` mantienen la credencial vieja cacheada en memoria | Forzar `--force-new-deployment` en ambos servicios ECS tras cualquier cambio de credencial hecho desde la UI de n8n |

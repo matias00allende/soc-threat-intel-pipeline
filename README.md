@@ -1,8 +1,8 @@
 # Pipeline SOC - Boletines de inteligencia de amenazas
 
 Automatiza la ingesta de boletines de ciberseguridad, extrae indicadores de compromiso (IoC),
-actualiza listas de bloqueo en el firewall y notifica al equipo por correo, todo en menos de
-cinco minutos desde la recepción del boletín.
+actualiza la lista de bloqueo de hashes SHA-256, la sincroniza de forma opcional con Bitdefender
+GravityZone y notifica al equipo por correo.
 
 ---
 

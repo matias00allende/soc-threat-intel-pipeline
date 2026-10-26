@@ -233,7 +233,7 @@ n8n → SQS → send-worker Lambda → SES → destinatarios corporativos
 
 ### Controles de perímetro
 - WAFv2 con reglas managed + IP allowlist (ADMIN_CIDR)
-- ALB con SG restringido al WAF
+- WAFv2 asociado al ALB; el Security Group del ALB limita el acceso de red al balanceador
 - No hay puertos de administración expuestos a Internet
 
 ### Controles de red

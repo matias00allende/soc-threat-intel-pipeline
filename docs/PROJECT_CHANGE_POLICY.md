@@ -7,7 +7,7 @@
 
 ## PRINCIPIOS
 
-1. **IaC primero:** Todo cambio de infraestructura que persista en producción debe reflejarse en el template CloudFormation.
+1. **IaC primero:** Todo cambio persistente en los recursos del stack `stack-ecs-n8n` debe reflejarse en su template CloudFormation. Los recursos fuera de ese stack (Lambdas, flujo de correo, VPC compartida) siguen el proceso del tipo de cambio que les corresponde.
 2. **Trazabilidad:** Todo cambio material debe quedar documentado con: qué se cambió, por qué, cuándo, por quién.
 3. **Reversibilidad:** Todo cambio debe tener un plan de rollback antes de ejecutarse.
 4. **Mínimo blast radius:** Cambiar solo lo necesario. No aprovechar un despliegue para hacer cambios no relacionados.
@@ -40,7 +40,7 @@
 **Proceso obligatorio:**
 1. Modificar código en `src/lambdas/*/`
 2. Actualizar `CHANGELOG.md`
-3. Empaquetar y desplegar via AWS CLI
+3. Empaquetar y desplegar vía AWS CLI
 4. Verificar logs Lambda post-despliegue
 5. Si cambia el contrato de entrada/salida: actualizar `docs/DOCUMENTACION_PROYECTO.txt`
 
@@ -66,7 +66,7 @@
 
 **Proceso obligatorio:**
 1. Actualizar artefacto correspondiente en `infra/mail_ingest/` o `infra/policies/`
-2. Aplicar cambio via AWS CLI
+2. Si el recurso pertenece al stack `stack-ecs-n8n`, aplicar el proceso del tipo A. Para recursos gestionados fuera del stack, aplicar el cambio con AWS CLI
 3. Documentar en `CHANGELOG.md`
 4. Verificar funcionamiento del flujo con un correo de prueba
 5. Registrar en `docs/DOCUMENTACION_PROYECTO.txt`
